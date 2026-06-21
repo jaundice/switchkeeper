@@ -27,6 +27,7 @@
     "appId": "io.github.jaundice.switchkeeper",
     "productName": "Switchkeeper",
     "electronVersion": "33.4.11",
+    "npmRebuild": false,
     "files": ["main.cjs", "preload.cjs", "renderer/**/*", "build/**/*"],
     "directories": { "output": "release" },
     "win": { "target": "nsis" },

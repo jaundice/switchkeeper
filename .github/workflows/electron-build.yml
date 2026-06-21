@@ -28,7 +28,9 @@ jobs:
           node-version: 22
 
       - name: Install workspace deps
-        run: npm ci
+        # npm install (not ci) installs app-builder-bin's platform binaries reliably
+        # in this workspace; a clean `npm ci` left them partially extracted.
+        run: npm install --no-audit --no-fund
 
       - name: Bundle engine + build installers
         run: npm run dist --workspace @switchkeeper/desktop
