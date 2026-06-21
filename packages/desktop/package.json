@@ -32,6 +32,6 @@
     "directories": { "output": "release" },
     "win": { "target": "nsis" },
     "mac": { "target": "dmg", "category": "public.app-category.utilities" },
-    "linux": { "target": ["AppImage", "deb"], "category": "Network" }
+    "linux": { "target": ["AppImage", "deb"], "category": "Network", "executableName": "switchkeeper", "artifactName": "${productName}-${version}-${arch}.${ext}" }
   }
 }
