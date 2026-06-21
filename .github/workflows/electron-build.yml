@@ -20,12 +20,27 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write   # needed to create/update the GitHub Release on tag pushes
+    env:
+      # Pin Electron / electron-builder download caches to a fixed, cross-platform
+      # path inside the workspace so actions/cache can persist them between runs.
+      ELECTRON_CACHE: ${{ github.workspace }}/.ebcache/electron
+      ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/.ebcache/electron-builder
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm   # caches ~/.npm (download cache), keyed on package-lock.json
+
+      - name: Cache Electron & builder binaries
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ebcache
+          # electronVersion lives in the desktop package.json, so re-key on it.
+          key: ${{ runner.os }}-electron-${{ hashFiles('packages/desktop/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-
 
       - name: Install workspace deps
         # npm install (not ci) installs app-builder-bin's platform binaries reliably
