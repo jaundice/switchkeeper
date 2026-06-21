@@ -10,7 +10,7 @@
     "url": "git+https://github.com/jaundice/switchkeeper.git",
     "directory": "packages/desktop"
   },
-  "author": "jaundice",
+  "author": "jaundice <jaundice@users.noreply.github.com>",
   "license": "MIT",
   "main": "main.cjs",
   "scripts": {
@@ -26,6 +26,7 @@
   "build": {
     "appId": "io.github.jaundice.switchkeeper",
     "productName": "Switchkeeper",
+    "electronVersion": "33.4.11",
     "files": ["main.cjs", "preload.cjs", "renderer/**/*", "build/**/*"],
     "directories": { "output": "release" },
     "win": { "target": "nsis" },
