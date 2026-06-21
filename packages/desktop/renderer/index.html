@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline';" />
+    <title>Switchkeeper</title>
+    <style>
+      :root {
+        --bg: #0f1419; --panel: #18202b; --panel2: #1f2937; --line: #2b3645;
+        --text: #e6edf3; --muted: #8b98a9; --accent: #4f9cf9; --green: #3fb950;
+        --amber: #d29922; --red: #f85149; --chip: #243244;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0; background: var(--bg); color: var(--text);
+        font: 13px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif;
+      }
+      header {
+        display: flex; align-items: center; gap: 10px; padding: 12px 16px;
+        background: var(--panel); border-bottom: 1px solid var(--line); position: sticky; top: 0;
+      }
+      header h1 { font-size: 15px; margin: 0 12px 0 0; font-weight: 600; letter-spacing: .3px; }
+      header .logo { color: var(--accent); }
+      input {
+        background: var(--panel2); border: 1px solid var(--line); color: var(--text);
+        padding: 6px 9px; border-radius: 6px; font-size: 13px;
+      }
+      input#host { width: 150px; } input#community { width: 100px; } input#wcommunity { width: 120px; }
+      header select, #v3bar select { background: var(--panel2); border: 1px solid var(--line); color: var(--text);
+        padding: 6px 8px; border-radius: 6px; font-size: 13px; }
+      #v3bar { display: flex; gap: 8px; align-items: center; padding: 8px 16px; background: var(--panel);
+        border-bottom: 1px solid var(--line); }
+      #v3bar input { width: 118px; }
+      button {
+        background: var(--accent); color: #06101f; border: 0; padding: 7px 14px;
+        border-radius: 6px; font-weight: 600; cursor: pointer;
+      }
+      button:disabled { opacity: .5; cursor: default; }
+      button.secondary { background: var(--panel2); color: var(--text); border: 1px solid var(--line); }
+      button.secondary.active { background: var(--accent); color: #06101f; border-color: var(--accent); }
+      .openui { color: var(--accent); text-decoration: none; }
+      .openui:hover { text-decoration: underline; }
+      #status { color: var(--muted); margin-left: auto; }
+      #status.spin::before { content: "\21bb"; display: inline-block; margin-right: 6px; animation: sp 0.8s linear infinite; }
+      @keyframes sp { to { transform: rotate(360deg); } }
+      main { padding: 16px; }
+      .device { display: flex; flex-wrap: wrap; gap: 10px 22px; align-items: baseline;
+        background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+      .device .model { font-size: 17px; font-weight: 600; }
+      .device .kv { color: var(--muted); } .device .kv b { color: var(--text); font-weight: 500; }
+      .badges { display: flex; gap: 6px; flex-wrap: wrap; width: 100%; margin-top: 4px; }
+      .badge { font-size: 11px; padding: 2px 8px; border-radius: 20px; background: var(--chip); color: var(--muted); }
+      .badge.on { background: rgba(63,185,80,.15); color: var(--green); }
+      .badge.warn { background: rgba(210,153,34,.15); color: var(--amber); }
+      h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted);
+        margin: 22px 0 8px; }
+      table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line);
+        border-radius: 10px; overflow: hidden; }
+      th, td { text-align: left; padding: 7px 12px; border-bottom: 1px solid var(--line); }
+      th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
+      tr:last-child td { border-bottom: 0; }
+      td.num { color: var(--muted); font-variant-numeric: tabular-nums; }
+      .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+      .dot.up { background: var(--green); } .dot.down { background: #3b4754; }
+      .chip { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 5px;
+        background: var(--chip); margin: 1px 3px 1px 0; }
+      .chip.untag { background: rgba(79,156,249,.16); color: var(--accent); }
+      .chip.tag { background: rgba(210,153,34,.16); color: var(--amber); }
+      .empty { color: var(--muted); }
+      .hint { color: var(--muted); margin: 6px 2px; }
+      .error { color: var(--red); }
+      main { padding-bottom: 64px; }
+      select.pvid { background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+        border-radius: 5px; padding: 2px 4px; font: inherit; }
+      select.pvid.changed { border-color: var(--amber); color: var(--amber); }
+      .pending { position: fixed; left: 0; right: 0; bottom: 0; background: var(--panel2);
+        border-top: 2px solid var(--accent); padding: 10px 16px; display: flex; gap: 12px; align-items: center; }
+      .pending .count { color: var(--accent); font-weight: 600; }
+      .pending .msg { color: var(--muted); } .pending .spacer { flex: 1; }
+      .pending .ok { color: var(--green); } .pending .bad { color: var(--red); }
+      .discover { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 16px; }
+      .discover h3 { margin: 0 0 10px; font-size: 14px; }
+      .discover .row { display: flex; align-items: center; gap: 10px; padding: 4px 0; }
+      .discover .sub { color: var(--muted); font-variant-numeric: tabular-nums; }
+      .discover .res { display: flex; align-items: center; gap: 12px; padding: 7px 0; border-top: 1px solid var(--line); }
+      .discover .res .ip { color: var(--accent); font-weight: 600; }
+      .discover input[type=checkbox] { accent-color: var(--accent); }
+      table.matrix { width: auto; }
+      table.matrix th, table.matrix td { text-align: center; padding: 3px 7px; border: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+      table.matrix th { font-size: 11px; }
+      table.matrix td.pname { text-align: left; white-space: nowrap; color: var(--muted); }
+      table.matrix td.cell { cursor: pointer; min-width: 26px; font-weight: 600; user-select: none; }
+      table.matrix td.cell:hover { outline: 1px solid var(--accent); outline-offset: -1px; }
+      table.matrix td.cell.u { background: rgba(79,156,249,.22); color: var(--accent); }
+      table.matrix td.cell.t { background: rgba(210,153,34,.22); color: var(--amber); }
+      table.matrix td.cell.changed { box-shadow: inset 0 0 0 2px var(--accent); }
+      table.ports th.vh { text-align: center; font-variant-numeric: tabular-nums; border-left: 1px solid var(--line); }
+      table.ports td.vcell { text-align: center; cursor: pointer; min-width: 24px; font-weight: 600;
+        user-select: none; border-left: 1px solid var(--line); }
+      table.ports td.vcell:hover { outline: 1px solid var(--accent); outline-offset: -1px; }
+      table.ports td.vcell.u { background: rgba(79,156,249,.22); color: var(--accent); }
+      table.ports td.vcell.t { background: rgba(210,153,34,.22); color: var(--amber); }
+      table.ports td.vcell.changed { box-shadow: inset 0 0 0 2px var(--accent); }
+      .scrollwrap { max-height: 58vh; overflow: auto; border: 1px solid var(--line); border-radius: 10px; margin-bottom: 6px; }
+      .scrollwrap table { border: 0; border-radius: 0; }
+      .scrollwrap thead th { position: sticky; top: 0; z-index: 2; background: var(--panel2); }
+      select.lag { background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 5px; padding: 2px 4px; font: inherit; }
+      select.lag.changed { border-color: var(--amber); color: var(--amber); }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1><span class="logo">◧</span> Switchkeeper</h1>
+      <input id="host" value="" placeholder="switch IP (e.g. 192.168.1.10)" />
+      <select id="version" title="SNMP version"><option value="v2c">v2c</option><option value="v3">v3</option></select>
+      <input id="community" value="public" placeholder="community" />
+      <input id="wcommunity" placeholder="write community" title="required to apply changes" />
+      <button id="connect">Read switch</button>
+      <button id="refresh" class="secondary" title="Re-read the switch">&#x21bb; Refresh</button>
+      <button id="discoverBtn" class="secondary" title="Scan the network for switches">Discover</button>
+      <button id="saveBtn" class="secondary" title="Persist running config to startup">Save config</button>
+      <span id="status">ready</span>
+    </header>
+    <div id="v3bar" style="display:none">
+      <input id="v3user" placeholder="v3 user" />
+      <select id="v3authproto"><option value="">no auth</option><option value="md5">MD5</option><option value="sha">SHA</option></select>
+      <input id="v3authkey" type="password" placeholder="auth key" />
+      <select id="v3privproto"><option value="">no priv</option><option value="des">DES</option><option value="aes">AES</option></select>
+      <input id="v3privkey" type="password" placeholder="priv key" />
+    </div>
+    <main>
+      <div id="discoverPanel" class="discover" style="display:none"></div>
+      <div id="device" class="device" style="display:none"></div>
+      <div id="content"></div>
+    </main>
+    <div id="pending" class="pending" style="display:none"></div>
+    <script src="app.js"></script>
+  </body>
+</html>

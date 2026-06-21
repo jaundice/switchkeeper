@@ -1,0 +1,30 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+build/
+out/
+*.tsbuildinfo
+
+# test / coverage
+coverage/
+
+# secrets & local config
+.env
+.env.*
+!.env.example
+
+# logs
+*.log
+npm-debug.log*
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# electron-builder / packaging artifacts (later)
+release/
+*.app

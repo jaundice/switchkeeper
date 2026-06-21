@@ -1,0 +1,40 @@
+name: Hardware report
+description: Tell us how Switchkeeper worked (or didn't) with your switch
+labels: ["hardware"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Hardware reports drive the support matrix and vendor profiles — thank you!
+        Please redact real IPs, hostnames, and community strings.
+  - type: input
+    id: model
+    attributes:
+      label: Switch make & model
+      placeholder: e.g. Netgear GS748TP
+    validations:
+      required: true
+  - type: input
+    id: firmware
+    attributes:
+      label: Firmware version
+  - type: input
+    id: enterprise
+    attributes:
+      label: SNMP enterprise number (if known)
+      description: The vendor OID under 1.3.6.1.4.1.* — visible in a sysObjectID walk.
+  - type: checkboxes
+    id: results
+    attributes:
+      label: What worked?
+      options:
+        - label: Read (ports / VLANs / PVID)
+        - label: PoE status
+        - label: LAG read
+        - label: VLAN / PVID write
+        - label: Save running config
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Anything quirky — OIDs that differed, errors, source-IP write restrictions, etc.

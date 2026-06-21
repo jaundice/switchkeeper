@@ -1,0 +1,36 @@
+{
+  "name": "switchkeeper",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Switch-agnostic management for smart/managed switches whose original web UI no longer works. SNMP + NSDP, one engine, three hosts (Electron, Docker, MCP).",
+  "keywords": [
+    "snmp",
+    "switch",
+    "vlan",
+    "networking",
+    "poe",
+    "802.1q",
+    "managed-switch",
+    "electron",
+    "mcp",
+    "homelab"
+  ],
+  "homepage": "https://github.com/jaundice/switchkeeper#readme",
+  "bugs": "https://github.com/jaundice/switchkeeper/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jaundice/switchkeeper.git"
+  },
+  "license": "MIT",
+  "author": "jaundice",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present"
+  }
+}

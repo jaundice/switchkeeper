@@ -1,0 +1,36 @@
+{
+  "name": "@switchkeeper/engine",
+  "version": "0.1.0",
+  "description": "Switchkeeper core engine: data model, SNMP/NSDP transport, vendor profiles, safe transactional writes.",
+  "keywords": ["snmp", "switch", "vlan", "poe", "802.1q", "q-bridge", "networking"],
+  "homepage": "https://github.com/jaundice/switchkeeper#readme",
+  "bugs": "https://github.com/jaundice/switchkeeper/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jaundice/switchkeeper.git",
+    "directory": "packages/engine"
+  },
+  "author": "jaundice",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test",
+    "cli": "node src/cli.ts"
+  },
+  "dependencies": {
+    "net-snmp": "^3.11.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.2"
+  },
+  "license": "MIT"
+}

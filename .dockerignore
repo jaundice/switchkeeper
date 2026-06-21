@@ -1,0 +1,11 @@
+**/node_modules
+.git
+.github
+**/release
+**/dist
+**/build
+E:temp
+*.tar.gz
+deploy
+packages/desktop/main.cjs
+packages/desktop/preload.cjs

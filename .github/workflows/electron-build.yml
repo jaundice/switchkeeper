@@ -1,0 +1,61 @@
+name: electron-build
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: switchkeeper-windows
+          - os: macos-latest
+            artifact: switchkeeper-macos
+          - os: ubuntu-latest
+            artifact: switchkeeper-linux
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write   # needed to create/update the GitHub Release on tag pushes
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install workspace deps
+        run: npm ci
+
+      - name: Bundle engine + build installers
+        run: npm run dist --workspace @switchkeeper/desktop
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload installers (workflow artifacts)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            packages/desktop/release/*.exe
+            packages/desktop/release/*.dmg
+            packages/desktop/release/*.AppImage
+            packages/desktop/release/*.deb
+          if-no-files-found: ignore
+
+      # On a v* tag, publish a GitHub Release and attach this OS's installers.
+      # Each matrix job appends its own files to the same release for the tag.
+      - name: Publish to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            packages/desktop/release/*.exe
+            packages/desktop/release/*.dmg
+            packages/desktop/release/*.AppImage
+            packages/desktop/release/*.deb
+          generate_release_notes: true
+          fail_on_unmatched_files: false
