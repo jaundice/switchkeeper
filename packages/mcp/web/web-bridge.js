@@ -34,5 +34,10 @@
     },
     onScanDevice: (cb) => { scanCb = cb; return () => { scanCb = null; }; },
     openUrl: (url) => { window.open(url, "_blank", "noopener"); return Promise.resolve(); },
+    openLink: (url) => { window.open(url, "_blank", "noopener"); return Promise.resolve(); },
+    mibPointers: (req) => post("/api/mib-pointers", req),
+    mibStatus: () => Promise.resolve({ ok: true, data: { loaded: 0, indexed: 0 } }),
+    // MIB import uses the OS file picker; only the desktop app can do that.
+    importMib: () => Promise.resolve({ ok: false, error: "MIB import is available in the Switchkeeper desktop app." }),
   };
 })();

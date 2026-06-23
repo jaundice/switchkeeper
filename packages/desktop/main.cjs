@@ -1,6 +1,6 @@
 // Electron main process. The engine is bundled into ./build/engine.cjs (esbuild) and called
 // in-process, so the packaged app is fully self-contained (no host Node / no child processes).
-const { app, BrowserWindow, ipcMain, shell } = require("electron");
+const { app, BrowserWindow, ipcMain, shell, dialog } = require("electron");
 const path = require("path");
 const engine = require("./build/engine.cjs");
 
@@ -44,6 +44,35 @@ ipcMain.handle("net:scan", async (event, { specs, cred }) => {
 });
 ipcMain.handle("open:external", (_e, url) => {
   if (typeof url === "string" && /^https?:\/\/[\w.-]+(:\d+)?\/?$/.test(url)) shell.openExternal(url);
+});
+// Open a full https URL (used for MIB download pointers, which have paths/query).
+ipcMain.handle("open:link", (_e, url) => {
+  if (typeof url === "string" && /^https:\/\/[\w.-]+(:\d+)?(\/[^\s]*)?$/.test(url)) shell.openExternal(url);
+});
+
+// ---- MIB loader: download pointers + import vendor MIBs (in-process MibStore) ----
+let mibStore = null;
+const ensureMibStore = () => (mibStore = mibStore || engine.createMibStore());
+
+ipcMain.handle("mib:pointers", (_e, { enterprise, sysDescr } = {}) => {
+  try { return { ok: true, data: engine.mibPointersFor(enterprise, sysDescr) }; } catch (e) { return fail(e); }
+});
+ipcMain.handle("mib:status", () => {
+  try { return { ok: true, data: { loaded: mibStore ? mibStore.loadedModules().length : 0, indexed: mibStore ? mibStore.indexedModules().length : 0 } }; } catch (e) { return fail(e); }
+});
+ipcMain.handle("mib:import", async () => {
+  try {
+    const r = await dialog.showOpenDialog({
+      title: "Import MIB files",
+      properties: ["openFile", "multiSelections"],
+      filters: [{ name: "MIB files", extensions: ["mib", "txt", "my", "smi"] }, { name: "All files", extensions: ["*"] }],
+    });
+    if (r.canceled || !r.filePaths || !r.filePaths.length) return { ok: true, data: { canceled: true } };
+    const store = ensureMibStore();
+    const imported = [];
+    for (const f of r.filePaths) { const m = store.loadFile(f); if (m) imported.push(m); }
+    return { ok: true, data: { canceled: false, imported, modules: store.loadedModules().length, indexed: store.indexedModules().length } };
+  } catch (e) { return fail(e); }
 });
 
 function createWindow() {

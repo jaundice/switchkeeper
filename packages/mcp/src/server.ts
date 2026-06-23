@@ -20,6 +20,7 @@ import {
   applyDevice,
   saveDevice,
   profileForEnterprise,
+  mibPointersFor,
 } from "../../engine/src/index.ts";
 import type { Credential, Edit } from "../../engine/src/index.ts";
 
@@ -75,6 +76,10 @@ function buildServer(): McpServer {
     description: "Persist running config to startup (vendor-specific; may be unsupported on some models).",
     inputSchema: { host: z.string(), writeCommunity: z.string(), community: z.string().optional() },
   }, async ({ host, writeCommunity, community }) => ok(await saveDevice(host, v2c(community, writeCommunity))));
+  server.registerTool("switch_mib_pointers", {
+    description: "Where to download the vendor MIB for a switch, given its SNMP enterprise number (and optionally sysDescr). Returns official links plus a search fallback.",
+    inputSchema: { enterprise: z.number().optional(), sysDescr: z.string().optional() },
+  }, async ({ enterprise, sysDescr }) => ok(mibPointersFor(enterprise, sysDescr)));
   return server;
 }
 
@@ -129,6 +134,7 @@ if (httpIdx >= 0) {
     return { ok: true, data: results.map((r) => ({ ...r, vendor: profileForEnterprise(r.vendorEnterprise).name })) };
   }));
   app.get("/api/interfaces", (_req, res) => res.json({ ok: true, data: listInterfaces() }));
+  app.post("/api/mib-pointers", wrap(async (b) => ({ ok: true, data: mibPointersFor(b.enterprise, b.sysDescr) })));
 
   // --- MCP endpoint (stateless) ---
   app.post("/mcp", async (req, res) => {

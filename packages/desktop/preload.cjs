@@ -6,6 +6,10 @@ contextBridge.exposeInMainWorld("switchkeeper", {
   apply: (req) => ipcRenderer.invoke("switch:apply", req),
   save: (req) => ipcRenderer.invoke("switch:save", req),
   openUrl: (url) => ipcRenderer.invoke("open:external", url),
+  openLink: (url) => ipcRenderer.invoke("open:link", url),
+  mibPointers: (req) => ipcRenderer.invoke("mib:pointers", req),
+  mibStatus: () => ipcRenderer.invoke("mib:status"),
+  importMib: () => ipcRenderer.invoke("mib:import"),
   interfaces: () => ipcRenderer.invoke("net:interfaces"),
   scan: (req) => ipcRenderer.invoke("net:scan", req),
   onScanDevice: (cb) => {

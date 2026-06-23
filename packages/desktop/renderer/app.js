@@ -37,9 +37,45 @@ function renderDevice(d) {
       ${badge(c.poe ? "PoE" : "no PoE", c.poe)}
       ${badge("PortList " + (c.portListWidth ?? "?") + "B", true)}
       ${badge("source: " + (c.membershipSource || "?"), true)}
-    </div>`;
+    </div>
+    <div id="mibrow" class="mibrow"></div>`;
   const ou = document.getElementById("openui");
   if (ou) ou.onclick = (e) => { e.preventDefault(); window.switchkeeper.openUrl("http://" + d.host); };
+  populateMibRow(d);
+}
+
+// Show where to download this vendor's MIB, plus an Import control + loaded-module status.
+async function populateMibRow(d) {
+  const el = document.getElementById("mibrow");
+  if (!el) return;
+  let links = [], vendor = "", note = "";
+  try {
+    const r = await window.switchkeeper.mibPointers({ enterprise: d.vendorEnterprise, sysDescr: d.model });
+    if (r && r.ok && r.data) { links = r.data.links || []; vendor = r.data.vendor || ""; note = r.data.note || ""; }
+  } catch (e) { /* non-fatal */ }
+  const linkHtml = links.map((l) => `<a href="#" class="miblink" data-url="${esc(l.url)}">${esc(l.label)}</a>`).join(" · ");
+  el.innerHTML =
+    `<span class="kv">MIB${vendor ? " (" + esc(vendor) + ")" : ""}:</span> ${linkHtml}` +
+    ` <button id="mibimport" class="linkbtn" title="Load a vendor MIB file so Switchkeeper can name its OIDs">Import MIB…</button>` +
+    ` <span id="mibstatus" class="empty"></span>` +
+    (note ? `<div class="empty mibnote">${esc(note)}</div>` : "");
+  el.querySelectorAll(".miblink").forEach((a) => {
+    a.onclick = (e) => { e.preventDefault(); window.switchkeeper.openLink(a.getAttribute("data-url")); };
+  });
+  const status = () => document.getElementById("mibstatus");
+  const btn = document.getElementById("mibimport");
+  if (btn) btn.onclick = async () => {
+    btn.disabled = true;
+    try {
+      const r = await window.switchkeeper.importMib();
+      if (r && r.ok && r.data && !r.data.canceled) status().textContent = `loaded ${r.data.imported.length} module(s), ${r.data.modules} total`;
+      else if (r && !r.ok) status().textContent = r.error || "import unavailable";
+    } finally { btn.disabled = false; }
+  };
+  try {
+    const s = await window.switchkeeper.mibStatus();
+    if (s && s.ok && s.data && s.data.loaded) status().textContent = `${s.data.loaded} MIB module(s) loaded`;
+  } catch (e) { /* ignore */ }
 }
 
 function vlanTable(vlans) {
