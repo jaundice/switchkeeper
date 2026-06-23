@@ -24,6 +24,8 @@ export { saveRunningConfig, type SaveResult } from "./save.ts";
 export { discover, discoverMany, type DiscoverOptions } from "./discover.ts";
 export { expandTargets, ipToInt, intToIp } from "./targets.ts";
 export { listInterfaces, netmaskToPrefix, networkOf, type LocalInterface } from "./interfaces.ts";
+export { createMibStore, type MibStore, type MibObject } from "./mib.ts";
+export { mibPointersFor, mibSearchUrl, hasCuratedMibSource, type MibSource, type MibLink } from "./mibSources.ts";
 
 import { SnmpClient } from "./snmp.ts";
 import { probe } from "./capabilities.ts";
