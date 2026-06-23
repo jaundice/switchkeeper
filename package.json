@@ -1,6 +1,6 @@
 {
   "name": "switchkeeper",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Switch-agnostic management for smart/managed switches whose original web UI no longer works. SNMP + NSDP, one engine, three hosts (Electron, Docker, MCP).",
   "keywords": [

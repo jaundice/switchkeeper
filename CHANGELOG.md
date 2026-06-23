@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-23
+
+### Added
+
+- **MIB loader**: import vendor MIB files (net-snmp ModuleStore with topological
+  import-closure resolution) so Switchkeeper can resolve a device's OID names without
+  bundling vendor MIBs. New engine API: `createMibStore()`, `mibPointersFor()`.
+- **MIB download pointers**: the device header now shows where to download the vendor
+  MIB for the connected switch (curated official links keyed on SNMP enterprise number,
+  with a universal search fallback). Exposed over the web API (`/api/mib-pointers`) and
+  as the `switch_mib_pointers` MCP tool.
+
 ## [0.1.0] - 2026-06-21
 
 First public release.
