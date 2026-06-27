@@ -6,6 +6,26 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- **Apply verify/rollback**: `createVlan`/`deleteVlan` are now verified against the Q-BRIDGE
+  *static* table (the old code compared the RowStatus read-back to `createAndGo`, which never
+  matched and made every create/delete falsely "fail"). A SET the device accepts is never
+  rolled back, and a batch is no longer aborted by a read-back miss (e.g. an empty VLAN absent
+  from the *current* table). Rollback fires only on a genuine SNMP SET error, with correct
+  semantic inverses for create/delete.
+
+### Added
+
+- **Save running config** for Netgear/Marvell smart switches via the RADLAN-COPY-MIB `rlCopy`
+  table (running → startup). `switch_save` now attempts it (was previously unsupported).
+- **Topology reads**: LLDP neighbours and the forwarding database (MAC → port) via
+  `readTopology`, the `switch_topology` MCP tool, and `POST /api/topology` — for uplink/trunk
+  discovery.
+- **Extreme Networks (EXOS, enterprise 1916)** vendor profile (VLAN create/membership writes).
+- **LAG-read fallback** using `dot3adAggPortAttachedAggID` for switches that don't populate the
+  aggregator PortList.
+
 ## [0.2.0] - 2026-06-23
 
 ### Added
