@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { editToVarbinds, planChanges } from "../src/apply.ts";
+import { editToVarbinds, planChanges, applyChangeSet } from "../src/apply.ts";
 import { decodePortList } from "../src/portlist.ts";
+import { OID } from "../src/oids.ts";
 import type { DeviceState } from "../src/model.ts";
 
 function fixture(): DeviceState {
@@ -90,4 +91,99 @@ test("guard warns when changing an UP port (link active)", () => {
 test("no warning on a down, non-management port", () => {
   const cs = planChanges(fixture(), [{ kind: "setPvid", bridgePort: 1, vid: 20 }]);
   assert.equal(cs.diff[0].warning, undefined);
+});
+
+// --- apply/verify/rollback behaviour (field-report bug fixes) ---
+
+// Fixture for a switch that CAN create VLANs over SNMP (e.g. EXOS).
+function creatable(): DeviceState {
+  const s = fixture();
+  s.device.capabilities!.canCreateVlan = true;
+  return s;
+}
+
+// In-memory SNMP client: simulates the Q-BRIDGE static VLAN table so verify can be exercised.
+class FakeClient {
+  sets: { oid: string; value: number | Buffer }[][] = [];
+  staticRows = new Map<number, number>(); // vid -> RowStatus (1=active)
+  confirm = true; // whether read-backs reflect writes (false simulates EXOS empty-VLAN miss)
+  setHook: ((n: number) => void) | null = null;
+  private n = 0;
+  async set(vbs: { oid: string; value: number | Buffer }[]) {
+    this.n++;
+    if (this.setHook) this.setHook(this.n);
+    this.sets.push(vbs);
+    for (const vb of vbs) {
+      const m = vb.oid.match(/17\.7\.1\.4\.3\.1\.5\.(\d+)$/); // dot1qVlanStaticRowStatus.<vid>
+      if (m) { const vid = +m[1]; if (vb.value === 6) this.staticRows.delete(vid); else this.staticRows.set(vid, 1); }
+    }
+  }
+  async get(oids: string[]) { return oids.map(() => ({ value: 0 })); }
+  async column(oid: string) {
+    const map = new Map<string, { value: unknown }>();
+    if (this.confirm && oid === OID.dot1qVlanStaticRowStatus) {
+      for (const [vid, rs] of this.staticRows) map.set(String(vid), { value: rs });
+    }
+    return map;
+  }
+}
+
+const destroyed = (c: FakeClient, vid: number) =>
+  c.sets.some((vbs) => vbs.some((v) => new RegExp(`\\.3\\.1\\.5\\.${vid}$`).test(v.oid) && v.value === 6));
+
+test("createVlan: SET accepted + static row present -> verified, not rolled back", async () => {
+  const st = creatable();
+  const c = new FakeClient();
+  const out = await applyChangeSet(c as never, st, planChanges(st, [{ kind: "createVlan", vid: 4090, name: "x" }]));
+  assert.equal(out.status, "verified");
+  assert.equal(out.results[0].ok, true);
+  assert.equal(out.results[0].verified, true);
+  assert.equal(c.staticRows.get(4090), 1); // still exists
+  assert.equal(destroyed(c, 4090), false); // never rolled back
+});
+
+test("createVlan: SET accepted but read-back can't confirm -> applied, still NOT rolled back", async () => {
+  const st = creatable();
+  const c = new FakeClient();
+  c.confirm = false; // verify reads see nothing (the EXOS empty-VLAN false-fail)
+  const out = await applyChangeSet(c as never, st, planChanges(st, [{ kind: "createVlan", vid: 4091 }]));
+  assert.equal(out.status, "applied");
+  assert.equal(out.results[0].ok, true);
+  assert.equal(out.results[0].verified, false);
+  assert.equal(destroyed(c, 4091), false); // a successful SET is never rolled back
+});
+
+test("deleteVlan: SET accepted + row gone -> verified", async () => {
+  const st = creatable();
+  const c = new FakeClient();
+  c.staticRows.set(10, 1);
+  const out = await applyChangeSet(c as never, st, planChanges(st, [{ kind: "deleteVlan", vid: 10 }]));
+  assert.equal(out.status, "verified");
+  assert.equal(out.results[0].verified, true);
+  assert.equal(c.staticRows.has(10), false);
+});
+
+test("batch is not aborted by an unconfirmable verify", async () => {
+  const st = creatable();
+  const c = new FakeClient();
+  c.confirm = false; // neither create can be confirmed
+  const out = await applyChangeSet(c as never, st, planChanges(st, [
+    { kind: "createVlan", vid: 11 },
+    { kind: "createVlan", vid: 12 },
+  ]));
+  assert.equal(out.results.length, 2); // edit #2 still ran (no abort after #1)
+  assert.equal(out.status, "applied");
+  assert.ok(out.results.every((r) => r.ok));
+});
+
+test("a genuine SNMP SET error -> failed, prior accepted edits rolled back", async () => {
+  const st = creatable();
+  const c = new FakeClient();
+  c.setHook = (n) => { if (n === 2) throw new Error("genErr"); }; // 2nd set fails
+  const out = await applyChangeSet(c as never, st, planChanges(st, [
+    { kind: "createVlan", vid: 20 },
+    { kind: "createVlan", vid: 21 },
+  ]));
+  assert.equal(out.status, "failed");
+  assert.equal(destroyed(c, 20), true); // vid 20 was created then reverted
 });

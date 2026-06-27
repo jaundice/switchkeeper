@@ -183,33 +183,50 @@ export async function applyChangeSet(
 
   for (const edit of cs.edits) {
     const target = editToVarbinds(edit, state);
-    const rollback = await snapshotVarbinds(client, target);
+    const rollback = await computeRollback(client, edit, state, target);
     try {
       await client.set(target);
-      const ok = await verifyEdit(client, edit, target);
-      results.push({ edit, ok, verified: ok });
-      if (ok) {
-        applied.push({ edit, rollback });
-      } else {
-        // verify failed -> roll back everything applied so far (including this attempt)
-        await rollbackAll(client, [...applied, { edit, rollback }]);
-        return { ...cs, results, status: "rolledback" };
-      }
     } catch (e) {
+      // Genuine SNMP SET failure: the device rejected this edit, so nothing changed for it.
+      // Revert prior accepted edits and stop.
       results.push({ edit, ok: false, verified: false, error: (e as Error).message });
       await rollbackAll(client, applied);
       return { ...cs, results, status: "failed" };
     }
+    // The device ACCEPTED the SET (no SNMP error) -> the change is real. Record it as applied.
+    // verifyEdit is informational only: a read-back miss (e.g. an empty VLAN absent from the
+    // *current* table) must NOT trigger a rollback or abort the batch.
+    applied.push({ edit, rollback });
+    let verified = false;
+    try { verified = await verifyEdit(client, edit, target); } catch { verified = false; }
+    results.push({ edit, ok: true, verified });
   }
 
-  // optional auto-revert timer (test/preview mode)
+  // optional auto-revert timer (test/preview mode) reverts everything that was applied
   if (opts.autoRevertMs && opts.autoRevertMs > 0) {
     await delay(opts.autoRevertMs);
     await rollbackAll(client, applied);
     return { ...cs, results, status: "rolledback" };
   }
 
-  return { ...cs, results, status: "verified" };
+  // All SETs were accepted. "verified" if every read-back confirmed; otherwise "applied"
+  // (changes are live but at least one couldn't be confirmed via read-back).
+  return { ...cs, results, status: results.every((r) => r.verified) ? "verified" : "applied" };
+}
+
+/** Inverse of an edit, for rollback. create/delete need semantic inverses (a snapshot of a
+ *  not-yet-existing row can't be replayed); everything else reverts to its prior value. */
+async function computeRollback(client: SnmpClient, edit: Edit, state: DeviceState, target: VarbindSet[]): Promise<VarbindSet[]> {
+  if (edit.kind === "createVlan") {
+    return [{ oid: `${OID.dot1qVlanStaticRowStatus}.${edit.vid}`, type: T.Integer, value: 6 /* destroy */ }];
+  }
+  if (edit.kind === "deleteVlan") {
+    const v = state.vlans.find((x) => x.vid === edit.vid);
+    const vbs: VarbindSet[] = [{ oid: `${OID.dot1qVlanStaticRowStatus}.${edit.vid}`, type: T.Integer, value: 4 /* createAndGo */ }];
+    if (v?.name) vbs.push({ oid: `${OID.dot1qVlanStaticName}.${edit.vid}`, type: T.OctetString, value: Buffer.from(v.name, "utf8") });
+    return vbs; // best-effort: recreates the VLAN (member ports are not restored)
+  }
+  return snapshotVarbinds(client, target);
 }
 
 /** Read the current values of the OIDs we're about to set, so we can revert. */
@@ -238,11 +255,26 @@ async function readCurrentMembership(client: SnmpClient, vid: number): Promise<{
 }
 
 async function verifyEdit(client: SnmpClient, edit: Edit, target: VarbindSet[]): Promise<boolean> {
+  // VLAN create/delete: verify row existence in the *static* table. (The previous code compared
+  // the RowStatus read-back to the value we wrote -- createAndGo(4) -- which never matches, since
+  // a live row reports active(1); that caused every create/delete to "fail" verify.)
+  if (edit.kind === "createVlan") {
+    const rs = await vlanStaticRowStatus(client, edit.vid);
+    return rs !== undefined && rs !== 6; // present (active/notInService/notReady), not destroyed
+  }
+  if (edit.kind === "deleteVlan") {
+    const rs = await vlanStaticRowStatus(client, edit.vid);
+    return rs === undefined || rs === 6; // row gone
+  }
   if (edit.kind === "setVlanMembership") {
-    // Verify against the current table, not the static OIDs we wrote.
-    const got = await readCurrentMembership(client, edit.vid);
-    return setEq(new Set(uniq([...edit.tagged, ...edit.untagged])), got.egress)
-      && setEq(new Set(uniq(edit.untagged)), got.untagged);
+    const wantEgress = new Set(uniq([...edit.tagged, ...edit.untagged]));
+    const wantUntagged = new Set(uniq(edit.untagged));
+    const cur = await readCurrentMembership(client, edit.vid);
+    if (setEq(wantEgress, cur.egress) && setEq(wantUntagged, cur.untagged)) return true;
+    // Empty VLANs (no member ports) can be absent from the current table on some vendors
+    // (e.g. EXOS) -> fall back to the static membership columns.
+    const stat = await readStaticMembership(client, edit.vid);
+    return setEq(wantEgress, stat.egress) && setEq(wantUntagged, stat.untagged);
   }
   const got = await client.get(target.map((t) => t.oid));
   return target.every((t, i) => {
@@ -252,6 +284,30 @@ async function verifyEdit(client: SnmpClient, edit: Edit, target: VarbindSet[]):
     }
     return asInt(v) === (t.value as number);
   });
+}
+
+/** RowStatus of a VLAN in the Q-BRIDGE *static* table, or undefined if no such row. */
+async function vlanStaticRowStatus(client: SnmpClient, vid: number): Promise<number | undefined> {
+  const col = await client.column(OID.dot1qVlanStaticRowStatus);
+  for (const [idx, vb] of col) {
+    const parts = idx.split(".");
+    if (Number(parts[parts.length - 1]) === vid) return asInt(vb.value);
+  }
+  return undefined;
+}
+
+/** VLAN membership from the Q-BRIDGE *static* table (fallback verify source for empty VLANs). */
+async function readStaticMembership(client: SnmpClient, vid: number): Promise<{ egress: Set<number>; untagged: Set<number> }> {
+  const eg = await client.column(OID.dot1qVlanStaticEgressPorts);
+  const ut = await client.column(OID.dot1qVlanStaticUntaggedPorts);
+  const pick = (col: Map<string, { value: unknown }>) => {
+    for (const [idx, vb] of col) {
+      const parts = idx.split(".");
+      if (Number(parts[parts.length - 1]) === vid) return new Set(decodePortList(asBuffer(vb.value)));
+    }
+    return new Set<number>();
+  };
+  return { egress: pick(eg), untagged: pick(ut) };
 }
 
 function setEq(a: Set<number>, b: Set<number>): boolean {
