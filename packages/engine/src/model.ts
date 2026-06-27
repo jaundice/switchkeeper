@@ -178,3 +178,20 @@ export interface DiscoveryResult {
   baseMac?: string;
   vendorEnterprise?: number;
 }
+
+// ---- Topology helpers (read-only): LLDP neighbours + forwarding database ----
+
+export interface LldpNeighbor {
+  /** lldpRemLocalPortNum (correlate to a local port). */
+  localPort: number;
+  remoteSysName?: string;
+  remotePortId?: string;
+  remotePortDesc?: string;
+  remoteChassisId?: string;
+}
+
+export interface FdbEntry {
+  mac: string; // "aa:bb:cc:dd:ee:ff"
+  bridgePort: number;
+  vlan?: number; // Q-BRIDGE fdbId/VLAN (absent on the BRIDGE-MIB fallback)
+}

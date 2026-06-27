@@ -1,6 +1,12 @@
 // Vendor quirk profiles. Keyed on the SNMP enterprise number (from sysObjectID).
 // The standard-MIB core works on any compliant switch; a profile only overrides the
 // few things a vendor/model does differently — chiefly the VLAN write path.
+import { OID } from "./oids.ts";
+
+/** How a model persists running config to startup over SNMP (no standard object exists). */
+export type SaveMethod =
+  | { kind: "trigger"; oid: string; value?: number } // set a scalar to commit
+  | { kind: "copyRunningToStartup"; baseOid: string }; // RADLAN-COPY-MIB rlCopyEntry base
 
 export interface VendorProfile {
   enterprise: number;
@@ -19,7 +25,9 @@ export interface VendorProfile {
   /** Some vendors need an explicit "save running config" write to persist changes. */
   saveConfigOid?: string;
   saveConfigValue?: number;
-  /** Shown when no saveConfigOid is known for the model (instead of guessing a write). */
+  /** Preferred structured save method (overrides saveConfigOid when set). */
+  save?: SaveMethod;
+  /** Shown when no save method is known for the model (instead of guessing a write). */
   saveConfigNote?: string;
   notes?: string;
 }
@@ -37,18 +45,38 @@ const NETGEAR: VendorProfile = {
   // LAG config OID unconfirmed on this Marvell model; dot3adAggPortListPorts is read-only.
   // Likely dot3adAggPortActorAdminKey (.43.1.2.1.1.4) groups ports - test out of production.
   canEditLag: false,
-  // No confirmed SNMP save object: this is a Marvell-ROS smart switch (private tree shows
-  // rl*/rs* config registry under 4526.17.29), not Broadcom FASTPATH (4526.10). Don't guess.
+  // Marvell/Radlan stack -> RADLAN-COPY-MIB rlCopy table saves running->startup. This is the
+  // documented Radlan base (enterprises.89.87); if this GS748 grafts the rl* tree under its own
+  // enterprise (4526.17.29.*) instead, change baseOid accordingly. A wrong OID just errors
+  // harmlessly (noSuchName), so attempting it is safe; saveRunningConfig reports the result.
+  save: { kind: "copyRunningToStartup", baseOid: OID.rlCopyEntryBase },
   saveConfigNote:
-    "This Netgear smart switch (Marvell-based) exposes no confirmed SNMP save-config object. " +
-    "SNMP changes may persist automatically; to be sure they survive a reboot, use the switch " +
-    "web UI: Maintenance > Save Configuration. (A save OID can be added here if one is confirmed.)",
+    "Netgear smart switch (Marvell/Radlan). Save uses the RADLAN-COPY-MIB rlCopy table " +
+    "(running->startup). If save reports an error, the rl* tree may sit under 4526.17.29 on " +
+    "this model - confirm the prefix on the bench and update the profile baseOid.",
   notes:
     "GS748TP fw V5.2.0.11. Reads + PoE standard. dot1qPvid + membership writes (egress/untagged) " +
     "confirmed on EXISTING VLAN rows. VLAN CREATE over SNMP is unsupported - create the VLAN ID in " +
     "the switch UI first, then assign ports. PortList writes must be 6 or full 126 bytes (odd " +
     "lengths -> wrongLength); engine pads to portListWidth. Write community is source-locked to " +
     "the management station. Writes land in running config; persistence/save OID is TBD.",
+};
+
+const EXTREME: VendorProfile = {
+  enterprise: 1916,
+  name: "Extreme Networks (EXOS)",
+  // Field-confirmed on an X450G2 (EXOS 30.5): standard Q-BRIDGE createVlan + membership writes
+  // land and persist. Empty VLANs are absent from dot1qVlanCurrentTable, so VLAN verify falls
+  // back to the static table (handled in apply.ts).
+  vlanWritePath: "standard",
+  pvidWritable: true,
+  canCreateVlan: true,
+  // EXOS "sharing" (LAG) groups need the EXTREME private MIB; SNMP LAG write not yet wired.
+  canEditLag: false,
+  notes:
+    "Extreme X450/X465 (EXOS). Standard create/membership writes verified. Empty VLANs don't " +
+    "appear in the current table (verify uses the static table). LAG read via IEEE8023-LAG-MIB; " +
+    "LAG write needs the EXTREME private MIB (read-only for now).",
 };
 
 const GENERIC: VendorProfile = {
@@ -61,7 +89,10 @@ const GENERIC: VendorProfile = {
   notes: "Default: assume RFC 2674 compliant. Overridden once a vendor profile is known.",
 };
 
-const REGISTRY = new Map<number, VendorProfile>([[NETGEAR.enterprise, NETGEAR]]);
+const REGISTRY = new Map<number, VendorProfile>([
+  [NETGEAR.enterprise, NETGEAR],
+  [EXTREME.enterprise, EXTREME],
+]);
 
 export function profileForEnterprise(enterprise: number | undefined): VendorProfile {
   if (enterprise === undefined) return GENERIC;

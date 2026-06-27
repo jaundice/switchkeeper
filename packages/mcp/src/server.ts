@@ -21,6 +21,7 @@ import {
   saveDevice,
   profileForEnterprise,
   mibPointersFor,
+  readTopology,
 } from "../../engine/src/index.ts";
 import type { Credential, Edit } from "../../engine/src/index.ts";
 
@@ -80,6 +81,10 @@ function buildServer(): McpServer {
     description: "Where to download the vendor MIB for a switch, given its SNMP enterprise number (and optionally sysDescr). Returns official links plus a search fallback.",
     inputSchema: { enterprise: z.number().optional(), sysDescr: z.string().optional() },
   }, async ({ enterprise, sysDescr }) => ok(mibPointersFor(enterprise, sysDescr)));
+  server.registerTool("switch_topology", {
+    description: "Read LLDP neighbours and the forwarding database (MAC->port) from a switch, for uplink/trunk discovery (a port with many MACs is an uplink).",
+    inputSchema: { host: z.string(), community: z.string().optional() },
+  }, async ({ host, community }) => ok(await readTopology(host, v2c(community))));
   return server;
 }
 
@@ -135,6 +140,7 @@ if (httpIdx >= 0) {
   }));
   app.get("/api/interfaces", (_req, res) => res.json({ ok: true, data: listInterfaces() }));
   app.post("/api/mib-pointers", wrap(async (b) => ({ ok: true, data: mibPointersFor(b.enterprise, b.sysDescr) })));
+  app.post("/api/topology", wrap(async (b) => ({ ok: true, data: await readTopology(b.host, credFromWeb(b.cred)) })));
 
   // --- MCP endpoint (stateless) ---
   app.post("/mcp", async (req, res) => {

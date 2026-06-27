@@ -45,11 +45,24 @@ export const OID = {
   pethPsePortDetectionStatus: "1.3.6.1.2.1.105.1.1.1.6",
   pethPsePortPowerClassifications: "1.3.6.1.2.1.105.1.1.1.10",
 
-  // LLDP-MIB (optional, topology)
+  // LLDP-MIB (topology). lldpRemTable index = timeMark.localPortNum.remIndex
   lldpLocSysName: "1.0.8802.1.1.2.1.3.3.0",
+  lldpRemChassisId: "1.0.8802.1.1.2.1.4.1.1.5",
+  lldpRemPortId: "1.0.8802.1.1.2.1.4.1.1.7",
+  lldpRemPortDesc: "1.0.8802.1.1.2.1.4.1.1.8",
+  lldpRemSysName: "1.0.8802.1.1.2.1.4.1.1.9",
+
+  // Forwarding databases (MAC -> port). Q-BRIDGE first, BRIDGE-MIB as fallback.
+  dot1qTpFdbPort: "1.3.6.1.2.1.17.7.1.2.2.1.2", // index = fdbId.<6 mac octets>
+  dot1dTpFdbPort: "1.3.6.1.2.1.17.4.3.1.2", // index = <6 mac octets>
 
   // IEEE8023-LAG-MIB: per-aggregator member PortList (which physical ports are in each LAG)
   dot3adAggPortListPorts: "1.2.840.10006.300.43.1.1.2.1.1",
+  // Per aggregation port: the aggregator ifIndex it is bound to (0 = none). Fallback LAG read.
+  dot3adAggPortAttachedAggID: "1.2.840.10006.300.43.1.2.1.1.13",
+
+  // RADLAN-COPY-MIB rlCopyEntry base (Marvell/Radlan running->startup save; see save.ts).
+  rlCopyEntryBase: "1.3.6.1.4.1.89.87.2.1",
 } as const;
 
 // RowStatus values (SNMPv2-TC)

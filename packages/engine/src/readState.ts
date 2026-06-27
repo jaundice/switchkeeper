@@ -129,6 +129,32 @@ export async function readState(
     }
   } catch { /* LAG MIB not implemented */ }
 
+  // Fallback: some vendors (e.g. EXOS) don't populate dot3adAggPortListPorts. Build LAGs from
+  // dot3adAggPortAttachedAggID (per aggregation port -> the aggregator ifIndex it's bound to).
+  if (lags.length === 0) {
+    try {
+      const attached = await client.column(OID.dot3adAggPortAttachedAggID);
+      const byAgg = new Map<number, number[]>();
+      for (const [idx, vb] of attached) {
+        const portIf = Number(idx);
+        const aggIf = asInt(vb.value);
+        if (!aggIf || aggIf === portIf) continue; // 0 or self == not aggregated
+        const bp = ifToBridge.get(portIf);
+        if (bp === undefined) continue;
+        if (!byAgg.has(aggIf)) byAgg.set(aggIf, []);
+        byAgg.get(aggIf)!.push(bp);
+      }
+      for (const [aggIf, members] of byAgg) {
+        const id = ifToBridge.get(aggIf) ?? aggIf;
+        lags.push({ id, members: members.sort((a, b) => a - b), mode: "lacp" });
+        for (const m of members) {
+          const port = ports.find((p) => p.bridgePort === m);
+          if (port) port.lagId = id;
+        }
+      }
+    } catch { /* dot3adAggPortAttachedAggID not implemented */ }
+  }
+
   return { device, ports, vlans, lags, readAt: new Date().toISOString() };
 }
 
