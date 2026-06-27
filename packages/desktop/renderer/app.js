@@ -193,6 +193,8 @@ function cycleCell(port, vid) {
 
 function renderAll() {
   renderDevice(lastState.device);
+  const tp = $("topology");
+  if (tp) { tp.style.display = "none"; tp.innerHTML = ""; } // clear stale topology on re-read
   $("content").innerHTML = vlanTable(lastState.vlans) + renderPorts(lastState.ports);
   document.querySelectorAll("select.pvid").forEach((sel) => {
     sel.addEventListener("change", () => {
@@ -420,8 +422,55 @@ async function saveConfig() {
   else setStatus("save: " + (s ? s.message : "no result"), "error");
 }
 
+// --- Topology: LLDP neighbours + forwarding database (MAC -> port) ---
+function portLabel(num) {
+  const p = (lastState?.ports || []).find((x) => x.bridgePort === num || x.ifIndex === num);
+  return p ? esc(p.name) + (p.label ? " (" + esc(p.label) + ")" : "") : "#" + num;
+}
+
+async function loadTopology() {
+  if (!lastState) { setStatus("read a switch first"); return; }
+  const panel = $("topology");
+  if (panel.style.display === "block") { panel.style.display = "none"; return; } // toggle off
+  setStatus("reading topology...", "spin");
+  const res = await window.switchkeeper.topology({ host: $("host").value.trim(), cred: getCred() });
+  if (!res || !res.ok) { setStatus("topology error: " + ((res && res.error) || "no result"), "error"); return; }
+  renderTopology(res.data || { lldp: [], fdb: [] });
+  panel.style.display = "block";
+  setStatus("topology loaded");
+}
+
+function renderTopology(data) {
+  const lldp = data.lldp || [];
+  const fdb = data.fdb || [];
+  const lldpRows = lldp.map((n) =>
+    `<tr><td>${portLabel(n.localPort)}</td><td>${esc(n.remoteSysName || "")}</td>` +
+    `<td>${esc(n.remotePortDesc || n.remotePortId || "")}</td><td class="mono">${esc(n.remoteChassisId || "")}</td></tr>`
+  ).join("") || `<tr><td colspan="4" class="empty">no LLDP neighbours reported</td></tr>`;
+
+  const byPort = new Map();
+  for (const e of fdb) byPort.set(e.bridgePort, (byPort.get(e.bridgePort) || 0) + 1);
+  const hint = [...byPort.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5)
+    .map(([port, c]) => `<span class="chip">${portLabel(port)}: ${c} MAC${c === 1 ? "" : "s"}</span>`).join("")
+    || "<span class='empty'>no MACs learned</span>";
+
+  const cap = 300;
+  const macRows = fdb.slice(0, cap).map((e) =>
+    `<tr><td class="mono">${esc(e.mac)}</td><td>${e.vlan ?? ""}</td><td>${portLabel(e.bridgePort)}</td></tr>`
+  ).join("") || `<tr><td colspan="3" class="empty">forwarding database empty</td></tr>`;
+
+  $("topology").innerHTML =
+    `<h2>LLDP neighbours (${lldp.length})</h2>` +
+    `<div class="scrollwrap"><table><thead><tr><th>Local port</th><th>Neighbour</th><th>Remote port</th><th>Chassis</th></tr></thead><tbody>${lldpRows}</tbody></table></div>` +
+    `<h2>Forwarding database (${fdb.length} MAC${fdb.length === 1 ? "" : "s"})</h2>` +
+    `<div class="hint">Likely uplinks (most MACs): ${hint}</div>` +
+    `<div class="scrollwrap"><table><thead><tr><th>MAC</th><th>VLAN</th><th>Port</th></tr></thead><tbody>${macRows}</tbody></table></div>` +
+    (fdb.length > cap ? `<div class="empty">showing first ${cap} of ${fdb.length}</div>` : "");
+}
+
 $("connect").addEventListener("click", connect);
 $("refresh").addEventListener("click", connect);
+$("topoBtn").addEventListener("click", loadTopology);
 $("discoverBtn").addEventListener("click", openDiscover);
 $("saveBtn").addEventListener("click", saveConfig);
 $("version").addEventListener("change", toggleVersion);

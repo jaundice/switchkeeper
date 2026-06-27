@@ -29,6 +29,9 @@ ipcMain.handle("switch:apply", async (_e, { host, cred, edits }) => {
 ipcMain.handle("switch:save", async (_e, { host, cred }) => {
   try { const r = await engine.applyDevice(host, credFromWeb(cred), [], { save: true }); return { ok: true, data: { mode: "apply", changeSet: r.changeSet, save: r.save } }; } catch (e) { return fail(e); }
 });
+ipcMain.handle("switch:topology", async (_e, { host, cred }) => {
+  try { return { ok: true, data: await engine.readTopology(host, credFromWeb(cred)) }; } catch (e) { return fail(e); }
+});
 ipcMain.handle("net:interfaces", async () => {
   try { return { ok: true, data: engine.listInterfaces() }; } catch (e) { return fail(e); }
 });

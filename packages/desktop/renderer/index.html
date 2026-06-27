@@ -112,6 +112,10 @@
       .linkbtn { background: none; border: 1px solid var(--line); color: var(--text); border-radius: 5px; padding: 1px 7px; font: inherit; font-size: 12px; cursor: pointer; }
       .linkbtn:hover { border-color: var(--accent); }
       .mibnote { width: 100%; font-size: 11px; margin-top: 2px; }
+      .mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
+      .topo { margin-bottom: 14px; }
+      .topo .hint { color: var(--muted); font-size: 12px; margin: 4px 0 8px; }
+      .topo .chip { display: inline-block; margin-right: 6px; }
     </style>
   </head>
   <body>
@@ -125,6 +129,7 @@
       <button id="refresh" class="secondary" title="Re-read the switch">&#x21bb; Refresh</button>
       <button id="discoverBtn" class="secondary" title="Scan the network for switches">Discover</button>
       <button id="saveBtn" class="secondary" title="Persist running config to startup">Save config</button>
+      <button id="topoBtn" class="secondary" title="LLDP neighbours + MAC address table">Topology</button>
       <span id="status">ready</span>
     </header>
     <div id="v3bar" style="display:none">
@@ -137,6 +142,7 @@
     <main>
       <div id="discoverPanel" class="discover" style="display:none"></div>
       <div id="device" class="device" style="display:none"></div>
+      <div id="topology" class="topo" style="display:none"></div>
       <div id="content"></div>
     </main>
     <div id="pending" class="pending" style="display:none"></div>

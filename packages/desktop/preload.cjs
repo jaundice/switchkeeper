@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld("switchkeeper", {
   plan: (req) => ipcRenderer.invoke("switch:plan", req),
   apply: (req) => ipcRenderer.invoke("switch:apply", req),
   save: (req) => ipcRenderer.invoke("switch:save", req),
+  topology: (req) => ipcRenderer.invoke("switch:topology", req),
   openUrl: (url) => ipcRenderer.invoke("open:external", url),
   openLink: (url) => ipcRenderer.invoke("open:link", url),
   mibPointers: (req) => ipcRenderer.invoke("mib:pointers", req),
