@@ -10,7 +10,7 @@
 // logs "Can not find X"). So a naive directory load registers almost nothing. The
 // fix is a moduleName->file index plus a TOPOLOGICAL load that pulls each module's
 // import closure first. Validated against a 7,900-file real-world archive.
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { readFileSync, readdirSync, writeFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import snmp from "net-snmp";
@@ -125,7 +125,12 @@ export function createMibStore(): MibStore {
   let seen = new Set<string>(); // attempted (incl. unknown imports)
   let inprog = new Set<string>(); // cycle guard
   let symCache = new Map<string, MibObject>(); // symbol -> object (first definition wins)
-  let symDirty = true; // symCache needs (re)building from registered modules
+  let symDirty = true; // symCache needs (re)building
+  // The distilled result of parsing: module -> its objects. This is ALL the engine needs at
+  // runtime, and unlike net-snmp's ModuleStore (which has no serialize/clone API) it's plain data
+  // we can persist. A loadDir warm-load rebuilds this from a JSON cache and skips parsing entirely.
+  let resolved = new Map<string, MibObject[]>();
+  let indexedNames: string[] | null = null; // set on a warm (cache) load, where we don't index files
   const dynamicBad = new Set<string>(); // modules found to poison net-snmp's parser
 
   // A poison can't be undone once loaded, so when one is found mid-scan we discard the store and
@@ -173,12 +178,18 @@ export function createMibStore(): MibStore {
     return n;
   }
 
-  // Build the symbol -> OID cache from all registered modules. Done lazily (on first findOid after
-  // a load) rather than per-module during loading: getProvidersForModule is O(store size), so
-  // calling it for every module mid-load was quadratic and dominated load time on large sets.
+  // Pull providers for any newly-registered modules into `resolved` (the distilled, cacheable map).
+  // getProvidersForModule is O(store size), so we do this in one batch after loading rather than
+  // per-module mid-load (which was quadratic). On a warm load `resolved` is already filled from disk.
+  function syncResolved() {
+    for (const m of registered) if (!resolved.has(m)) resolved.set(m, providersLive(m));
+  }
+
+  // Build the symbol -> OID lookup from `resolved`. Lazy (on first findOid after a load).
   function buildSymCache() {
+    syncResolved();
     symCache = new Map<string, MibObject>();
-    for (const m of registered) for (const p of providers(m)) if (!symCache.has(p.name)) symCache.set(p.name, p);
+    for (const list of resolved.values()) for (const p of list) if (!symCache.has(p.name)) symCache.set(p.name, p);
     symDirty = false;
   }
 
@@ -221,6 +232,8 @@ export function createMibStore(): MibStore {
     const name = indexFile(file);
     if (!name) return null;
     loadModule(name);
+    syncResolved(); // keep the distilled map in step with single-file imports
+    symDirty = true;
     return name;
   }
 
@@ -235,6 +248,18 @@ export function createMibStore(): MibStore {
       return importsOf(t).filter((d) => index.has(d)).length;
     };
     return [...names].sort((a, b) => score(a) - score(b));
+  }
+
+  // A cheap fingerprint of a directory's MIB files (name+size+mtime, stat only -- no reads). If it
+  // matches a saved cache, the parse result is reused verbatim.
+  function dirSignature(dir: string): string {
+    let files: string[] = [];
+    try { files = readdirSync(dir).filter((f) => !f.startsWith(".")).sort(); } catch { return ""; }
+    return files
+      .map((f) => {
+        try { const s = statSync(join(dir, f)); return `${f}:${s.size}:${Math.floor(s.mtimeMs)}`; } catch { return `${f}:?`; }
+      })
+      .join("|");
   }
 
   // Load good modules ordered[from..to) into a THROWAWAY store (no recursion: `ordered` is
@@ -301,9 +326,28 @@ export function createMibStore(): MibStore {
   // bad file would otherwise register zero modules. Strategy: load all the good ones, then check
   // a canary. If the store is healthy (the common case: clean sets, or a cached quarantine list)
   // we're done. Otherwise a poison slipped in: discover the culprit(s) in throwaway stores, then
-  // rebuild the real store without them. The quarantine set is cached as ".switchkeeper-skip" in
-  // the dir so later loads (and restarts) skip straight to a healthy store with no probing.
+  // rebuild the real store without them.
+  //
+  // Two on-disk caches in the dir make repeat loads cheap (parsing a big vendor set is the slow
+  // part, and net-snmp can't serialize its parsed store): ".switchkeeper-skip" remembers the
+  // quarantined modules, and ".switchkeeper-cache.json" stores the distilled module->objects map
+  // plus a signature of the files. If the signature still matches, we rebuild everything from the
+  // JSON and skip net-snmp parsing entirely -- a restart goes from minutes to milliseconds.
   function loadDir(dir: string): { loaded: number; skipped: string[] } {
+    const sig = dirSignature(dir);
+    const cacheFile = join(dir, ".switchkeeper-cache.json");
+    // Warm path: files unchanged -> rebuild from the distilled JSON, no parsing.
+    try {
+      const c = JSON.parse(readFileSync(cacheFile, "utf8"));
+      if (c && c.sig && c.sig === sig && c.modules) {
+        resolved = new Map(Object.entries(c.modules) as [string, MibObject[]][]);
+        indexedNames = Array.isArray(c.indexed) ? c.indexed : [...resolved.keys()];
+        for (const n of c.skipped || []) dynamicBad.add(n);
+        symDirty = true;
+        return { loaded: resolved.size, skipped: c.skipped || [] };
+      }
+    } catch { /* no/stale cache -> cold parse */ }
+
     let files: string[] = [];
     try { files = readdirSync(dir); } catch { return { loaded: 0, skipped: [] }; }
     const skipped: string[] = [];
@@ -313,10 +357,9 @@ export function createMibStore(): MibStore {
       const name = indexFile(join(dir, f));
       if (name) names.push(name); else skipped.push(f); // non-MIB files are skipped
     }
-    const skipFile = join(dir, ".switchkeeper-skip");
     const bad = new Set<string>();
     try {
-      for (const line of readFileSync(skipFile, "utf8").split("\n")) {
+      for (const line of readFileSync(join(dir, ".switchkeeper-skip"), "utf8").split("\n")) {
         const s = line.trim();
         if (s) bad.add(s);
       }
@@ -324,7 +367,6 @@ export function createMibStore(): MibStore {
     for (const n of bad) dynamicBad.add(n);
 
     const ordered = depthOrder(names);
-    const startBad = bad.size;
     const loadGood = () => { for (const n of ordered) if (!bad.has(n)) loadModule(n); };
 
     loadGood();
@@ -334,13 +376,21 @@ export function createMibStore(): MibStore {
       loadGood();
     }
 
-    if (bad.size !== startBad) {
-      try { writeFileSync(skipFile, [...bad].join("\n") + "\n", "utf8"); } catch { /* */ }
-    }
-    return { loaded: registered.size, skipped: [...skipped, ...bad] };
+    // Distill the parse result and persist both caches so the next load skips parsing entirely.
+    resolved = new Map();
+    syncResolved();
+    indexedNames = [...index.keys()];
+    symDirty = true;
+    const quarantined = [...skipped, ...bad];
+    try { writeFileSync(join(dir, ".switchkeeper-skip"), [...bad].join("\n") + "\n", "utf8"); } catch { /* */ }
+    try {
+      writeFileSync(cacheFile, JSON.stringify({ sig, indexed: indexedNames, skipped: quarantined, modules: Object.fromEntries(resolved) }));
+    } catch { /* */ }
+    return { loaded: resolved.size, skipped: quarantined };
   }
 
-  function providers(moduleName: string): MibObject[] {
+  // Extract a module's objects from the LIVE net-snmp store (used during a cold parse).
+  function providersLive(moduleName: string): MibObject[] {
     let raw: Array<{ name: string; oid?: string; scalarType?: number; maxAccess?: number }> = [];
     try {
       raw = quiet(() => store.getProvidersForModule(moduleName)) || [];
@@ -363,9 +413,10 @@ export function createMibStore(): MibStore {
     loadFile,
     loadDir,
     loadModule,
-    providers,
+    // Serve from the distilled map (covers warm/cache loads); fall back to the live store.
+    providers: (m: string) => resolved.get(m) ?? providersLive(m),
     findOid: (symbol: string) => { if (symDirty) buildSymCache(); return symCache.get(symbol) || null; },
-    loadedModules: () => [...registered],
-    indexedModules: () => [...index.keys()],
+    loadedModules: () => [...new Set<string>([...resolved.keys(), ...registered])],
+    indexedModules: () => indexedNames ?? [...index.keys()],
   };
 }
