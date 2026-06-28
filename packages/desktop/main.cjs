@@ -2,6 +2,7 @@
 // in-process, so the packaged app is fully self-contained (no host Node / no child processes).
 const { app, BrowserWindow, ipcMain, shell, dialog } = require("electron");
 const path = require("path");
+const fs = require("fs");
 const engine = require("./build/engine.cjs");
 
 // UI credential object -> engine Credential.
@@ -55,7 +56,15 @@ ipcMain.handle("open:link", (_e, url) => {
 
 // ---- MIB loader: download pointers + import vendor MIBs (in-process MibStore) ----
 let mibStore = null;
-const STD_MIB_DIR = path.join(__dirname, "..", "mcp", "mibs-std"); // bundled standard MIBs (dev path)
+// Bundled standard MIBs: in a packaged build they're copied to resources (electron-builder
+// extraResources); in dev (electron .) they live in the sibling mcp package.
+const STD_MIB_DIR = (() => {
+  try {
+    const packaged = path.join(process.resourcesPath || "", "mibs-std");
+    if (fs.existsSync(packaged)) return packaged;
+  } catch { /* not packaged */ }
+  return path.join(__dirname, "..", "mcp", "mibs-std");
+})();
 const ensureMibStore = () => {
   if (!mibStore) {
     mibStore = engine.createMibStore();

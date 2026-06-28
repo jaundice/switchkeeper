@@ -29,6 +29,7 @@
     "electronVersion": "33.4.11",
     "npmRebuild": false,
     "files": ["main.cjs", "preload.cjs", "renderer/**/*", "build/**/*"],
+    "extraResources": [{ "from": "../mcp/mibs-std", "to": "mibs-std" }],
     "directories": { "output": "release" },
     "win": { "target": "nsis" },
     "mac": { "target": "dmg", "category": "public.app-category.utilities" },

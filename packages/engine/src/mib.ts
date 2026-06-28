@@ -60,6 +60,15 @@ function quiet<T>(fn: () => T): T {
   }
 }
 
+// A few real-world MIBs crash net-snmp's ModuleStore parser in a way that POISONS the whole
+// store, so every subsequent load fails. We skip loading them: any module that imports one of
+// these still loads (just with those few symbols unresolved). Discovered empirically against a
+// large vendor archive (RMON2 / token-ring RMON / the LLDP-EXT family).
+const CORRUPTORS = new Set<string>(["RMON2-MIB", "TOKEN-RING-RMON-MIB"]);
+function isCorruptor(name: string): boolean {
+  return CORRUPTORS.has(name) || name.startsWith("LLDP-EXT-");
+}
+
 export interface MibStore {
   /** Recursively index a directory of MIB files (moduleName -> file). Returns count indexed. */
   indexDir(dir: string): number;
@@ -126,6 +135,7 @@ export function createMibStore(): MibStore {
 
   function loadModule(name: string): boolean {
     if (baseNames.has(name) || registered.has(name)) return true;
+    if (isCorruptor(name)) { seen.add(name); return false; } // skip: would poison the store
     if (inprog.has(name)) return false; // cycle: dependency still loading
     const file = index.get(name);
     if (!file) {
