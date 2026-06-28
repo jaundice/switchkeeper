@@ -237,47 +237,72 @@ export function createMibStore(): MibStore {
     return [...names].sort((a, b) => score(a) - score(b));
   }
 
-  // Load a prefix ordered[0..end) into a THROWAWAY store (skipping known-bad) and report whether
-  // the parser is still healthy. Because `ordered` is dependency-first, a prefix already contains
-  // each module's deps, so a poison shows up exactly at its own index -- no recursive closure
-  // loading needed. Keeps the real store untouched while we hunt.
-  function prefixHealthy(ordered: string[], end: number, bad: Set<string>): boolean {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const probe: any = snmp.createModuleStore();
-    const pbase = new Set<string>(probe.getModuleNames(true));
+  // Load good modules ordered[from..to) into a THROWAWAY store (no recursion: `ordered` is
+  // dependency-first, so a module's deps already precede it). Quiet; errors ignored.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function probeLoadRange(probe: any, base: Set<string>, ordered: string[], from: number, to: number, bad: Set<string>) {
     quiet(() => {
-      for (let i = 0; i < end; i++) {
+      for (let i = from; i < to; i++) {
         const n = ordered[i];
-        if (bad.has(n) || pbase.has(n)) continue;
+        if (bad.has(n) || base.has(n)) continue;
         const file = index.get(n);
         if (!file) continue;
         try { probe.loadFromFile(file); } catch { /* */ }
       }
     });
-    return canaryHealthy(probe);
   }
 
-  // Find the first module (in dependency order) that poisons the parser, via binary search on the
-  // prefix length: ~log2(n) probes instead of n. Returns null if the whole good set is healthy.
-  function findFirstPoison(ordered: string[], bad: Set<string>): string | null {
+  // Discover every module that poisons net-snmp's parser, adding them to `bad`. Done in throwaway
+  // stores with a windowed linear scan that resumes after each culprit, so total work is only a
+  // few full passes regardless of how many poisons there are -- crucial because parsing a large
+  // vendor set (e.g. Extreme, whose EXTREME-BASE-MIB alone is ~150 KB and a dependency of every
+  // other module) is expensive, so re-parsing the whole set per-probe (binary search) is far too
+  // slow on modest hardware. WINDOW keeps the canary-check count bounded.
+  function discoverPoisons(ordered: string[], bad: Set<string>) {
+    const WINDOW = 24;
     const len = ordered.length;
-    if (prefixHealthy(ordered, len, bad)) return null;
-    let lo = 1, hi = len, ans = len;
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1;
-      if (!prefixHealthy(ordered, mid, bad)) { ans = mid; hi = mid - 1; } else lo = mid + 1;
+    let start = 0;
+    for (let guard = 0; guard < len + 4 && start < len; guard++) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const probe: any = snmp.createModuleStore();
+      const base = new Set<string>(probe.getModuleNames(true));
+      probeLoadRange(probe, base, ordered, 0, start, bad); // good prefix (already cleared)
+      let found = -1;
+      for (let j = start; j < len && found < 0; j = Math.min(j + WINDOW, len)) {
+        const end = Math.min(j + WINDOW, len);
+        probeLoadRange(probe, base, ordered, j, end, bad);
+        if (!canaryHealthy(probe)) {
+          // poison is in [j,end): pinpoint it one module at a time from a fresh prefix
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const fine: any = snmp.createModuleStore();
+          const fbase = new Set<string>(fine.getModuleNames(true));
+          probeLoadRange(fine, fbase, ordered, 0, j, bad);
+          for (let k = j; k < end; k++) {
+            const n = ordered[k];
+            if (bad.has(n) || fbase.has(n)) continue;
+            const file = index.get(n);
+            if (!file) continue;
+            quiet(() => { try { fine.loadFromFile(file); } catch { /* */ } });
+            if (!canaryHealthy(fine)) { found = k; break; }
+          }
+          if (found < 0) found = end - 1; // safety: blame the last in the window
+        }
+        if (end >= len) break;
+      }
+      if (found < 0) break; // clean from `start` to the end
+      bad.add(ordered[found]);
+      dynamicBad.add(ordered[found]);
+      start = found; // resume right after the (now quarantined) culprit
     }
-    return ordered[ans - 1];
   }
 
   // Load every MIB in a directory, robust to files that poison net-snmp's parser. Some vendor
   // MIBs (Extreme's are notorious) crash the parser so badly that EVERY later load fails -- one
   // bad file would otherwise register zero modules. Strategy: load all the good ones, then check
   // a canary. If the store is healthy (the common case: clean sets, or a cached quarantine list)
-  // we're done. Otherwise a poison slipped in: we binary-search the dependency-ordered list to
-  // pin culprits one at a time (cheap, ~log n probes each), then rebuild the store without them.
-  // The quarantine set is cached as ".switchkeeper-skip" in the dir so later loads (and restarts)
-  // skip straight to a healthy store with no probing.
+  // we're done. Otherwise a poison slipped in: discover the culprit(s) in throwaway stores, then
+  // rebuild the real store without them. The quarantine set is cached as ".switchkeeper-skip" in
+  // the dir so later loads (and restarts) skip straight to a healthy store with no probing.
   function loadDir(dir: string): { loaded: number; skipped: string[] } {
     let files: string[] = [];
     try { files = readdirSync(dir); } catch { return { loaded: 0, skipped: [] }; }
@@ -304,14 +329,8 @@ export function createMibStore(): MibStore {
 
     loadGood();
     if (!canaryHealthy(store)) {
-      // Discover all poisons in throwaway stores first (no repeated rebuilds of the real store).
-      for (let guard = 0; guard < 200; guard++) {
-        const p = findFirstPoison(ordered, bad);
-        if (!p) break;
-        bad.add(p);
-        dynamicBad.add(p);
-      }
-      resetStore(); // the first attempt left the store corrupted; rebuild it clean
+      discoverPoisons(ordered, bad); // find culprits in throwaways
+      resetStore(); // the first attempt left the real store corrupted; rebuild it clean
       loadGood();
     }
 
