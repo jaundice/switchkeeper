@@ -10,6 +10,7 @@ import { z } from "zod";
 import express from "express";
 import fs from "node:fs";
 import path from "node:path";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
   listInterfaces,
@@ -51,20 +52,41 @@ function v2c(community?: string, writeCommunity?: string): Credential {
 }
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] });
 
-// --- server-side MIB store: user-uploaded MIBs persist in MIB_DIR and load on startup ---
+// --- server-side MIB store: user-uploaded MIBs persist in MIB_DIR ---
+// Parsing a large vendor MIB set is CPU-heavy and would block the event loop, so we never parse on
+// the request path. The store is served from MIB_DIR's on-disk cache (instant); if that cache is
+// missing/stale, a SEPARATE process (build-mib-cache.ts) rebuilds it in the background while the
+// server stays responsive. /api/mib-status reports {ready, building} so callers can poll.
 const MIB_DIR = process.env.SWITCHKEEPER_MIB_DIR || path.resolve(__dirname, "..", "..", "..", "mibs");
 const STD_MIB_DIR = path.resolve(__dirname, "..", "mibs-std"); // bundled standard IETF/IEEE MIBs
 let _mibStore: ReturnType<typeof createMibStore> | null = null;
-function mibStore() {
-  if (!_mibStore) {
-    _mibStore = createMibStore();
-    try { _mibStore.indexDir(STD_MIB_DIR); } catch { /* no bundle */ } // resolution base for uploads
-    try {
-      fs.mkdirSync(MIB_DIR, { recursive: true });
-      _mibStore.loadDir(MIB_DIR); // loads all uploads, auto-skipping any that poison the parser
-    } catch { /* empty/new dir */ }
-  }
+let mibBuilding = false;
+
+// Populate the store from MIB_DIR's cache without parsing. Returns the store, or null if no cache.
+function tryLoadMibCache() {
+  const s = createMibStore();
+  try { s.indexDir(STD_MIB_DIR); } catch { /* no bundle */ }
+  try { if (s.loadDirFromCache(MIB_DIR)) _mibStore = s; } catch { /* */ }
   return _mibStore;
+}
+
+// Kick off the cold build in a child process (non-blocking); it writes the cache when done.
+function spawnMibBuild() {
+  if (mibBuilding) return;
+  mibBuilding = true;
+  try { fs.mkdirSync(MIB_DIR, { recursive: true }); } catch { /* */ }
+  const script = path.join(__dirname, "build-mib-cache.ts");
+  const child = spawn(process.execPath, [...process.execArgv, script, MIB_DIR, STD_MIB_DIR], { stdio: "ignore" });
+  child.on("error", () => { mibBuilding = false; });
+  child.on("exit", () => { mibBuilding = false; tryLoadMibCache(); }); // pick up the fresh cache
+}
+
+// The ready store, or null while building (callers handle the not-ready case).
+function mibStore() {
+  if (_mibStore) return _mibStore;
+  if (tryLoadMibCache()) return _mibStore; // cache present -> instant
+  spawnMibBuild(); // no cache yet -> build in the background
+  return null;
 }
 
 function buildServer(): McpServer {
@@ -159,8 +181,9 @@ if (httpIdx >= 0) {
   app.post("/api/mib-pointers", wrap(async (b) => ({ ok: true, data: mibPointersFor(b.enterprise, b.sysDescr) })));
   app.post("/api/topology", wrap(async (b) => ({ ok: true, data: await readTopology(b.host, credFromWeb(b.cred)) })));
   app.get("/api/mib-status", (_req, res) => {
-    const s = mibStore();
-    res.json({ ok: true, data: { loaded: s.loadedModules().length, indexed: s.indexedModules().length, dir: MIB_DIR } });
+    const s = mibStore(); // null while a background build is in progress
+    if (!s) return res.json({ ok: true, data: { ready: false, building: mibBuilding, loaded: 0, indexed: 0, dir: MIB_DIR } });
+    res.json({ ok: true, data: { ready: true, building: false, loaded: s.loadedModules().length, indexed: s.indexedModules().length, dir: MIB_DIR } });
   });
   app.post("/api/mib-import", wrap(async (b) => {
     const files: { name: string; text: string }[] = Array.isArray(b.files)
@@ -168,15 +191,16 @@ if (httpIdx >= 0) {
       : (b.name && typeof b.text === "string" ? [{ name: b.name, text: b.text }] : []);
     if (!files.length) return { ok: false, error: "no MIB files provided" };
     fs.mkdirSync(MIB_DIR, { recursive: true });
-    const s = mibStore();
     const imported: string[] = [];
     for (const f of files) {
       const safe = path.basename(String(f.name || "uploaded.mib")).replace(/[^\w.\-]/g, "_");
       fs.writeFileSync(path.join(MIB_DIR, safe), String(f.text ?? ""), "latin1");
       imported.push(safe);
     }
-    const r = s.loadDir(MIB_DIR); // probes + loads, auto-skipping any file that poisons the parser
-    return { ok: true, data: { imported, loaded: r.loaded, skipped: r.skipped.length, modules: s.loadedModules().length, indexed: s.indexedModules().length } };
+    // New files invalidate the cache signature; rebuild in the background (no request-path parsing).
+    _mibStore = null;
+    spawnMibBuild();
+    return { ok: true, data: { imported, building: true, message: "MIBs saved; indexing in the background (poll /api/mib-status)" } };
   }));
 
   // --- MCP endpoint (stateless) ---
@@ -188,7 +212,10 @@ if (httpIdx >= 0) {
     await transport.handleRequest(req, res, req.body);
   });
 
-  app.listen(port, () => console.error(`switchkeeper on :${port} (UI /, API /api, MCP /mcp)`));
+  app.listen(port, () => {
+    console.error(`switchkeeper on :${port} (UI /, API /api, MCP /mcp)`);
+    mibStore(); // warm the MIB cache (serves instantly if cached, else builds in the background)
+  });
 } else {
   await buildServer().connect(new StdioServerTransport());
 }

@@ -104,6 +104,8 @@ export interface MibStore {
   loadFile(file: string): string | null;
   /** Load every MIB in a directory, auto-skipping files that poison the parser. */
   loadDir(dir: string): { loaded: number; skipped: string[] };
+  /** Fast path: populate from the dir's saved cache if it still matches; true if loaded, else false. */
+  loadDirFromCache(dir: string): boolean;
   /** Load a module by name (resolving its IMPORTS closure from the index first). */
   loadModule(name: string): boolean;
   /** All objects (name/oid) defined by a loaded module. */
@@ -282,8 +284,9 @@ export function createMibStore(): MibStore {
   // few full passes regardless of how many poisons there are -- crucial because parsing a large
   // vendor set (e.g. Extreme, whose EXTREME-BASE-MIB alone is ~150 KB and a dependency of every
   // other module) is expensive, so re-parsing the whole set per-probe (binary search) is far too
-  // slow on modest hardware. WINDOW keeps the canary-check count bounded.
-  function discoverPoisons(ordered: string[], bad: Set<string>) {
+  // slow on modest hardware. WINDOW keeps the canary-check count bounded. `onFound` is called as
+  // each culprit is identified so the caller can persist progress (making the scan resumable).
+  function discoverPoisons(ordered: string[], bad: Set<string>, onFound?: (name: string) => void) {
     const WINDOW = 24;
     const len = ordered.length;
     let start = 0;
@@ -317,8 +320,27 @@ export function createMibStore(): MibStore {
       if (found < 0) break; // clean from `start` to the end
       bad.add(ordered[found]);
       dynamicBad.add(ordered[found]);
+      if (onFound) onFound(ordered[found]); // persist progress -> resumable across restarts
       start = found; // resume right after the (now quarantined) culprit
     }
+  }
+
+  // Fast path only: if the dir's saved cache still matches the files, rebuild the distilled map
+  // from JSON (no net-snmp parsing) and return true. Returns false if there's no valid cache, in
+  // which case the caller must run the (slow, one-time) cold build via loadDir. This lets a server
+  // keep parsing off its request path: serve from cache instantly, build in the background.
+  function loadDirFromCache(dir: string): boolean {
+    try {
+      const c = JSON.parse(readFileSync(join(dir, ".switchkeeper-cache.json"), "utf8"));
+      if (c && c.sig && c.sig === dirSignature(dir) && c.modules) {
+        resolved = new Map(Object.entries(c.modules) as [string, MibObject[]][]);
+        indexedNames = Array.isArray(c.indexed) ? c.indexed : [...resolved.keys()];
+        for (const n of c.skipped || []) dynamicBad.add(n);
+        symDirty = true;
+        return true;
+      }
+    } catch { /* no/stale cache */ }
+    return false;
   }
 
   // Load every MIB in a directory, robust to files that poison net-snmp's parser. Some vendor
@@ -336,17 +358,8 @@ export function createMibStore(): MibStore {
   function loadDir(dir: string): { loaded: number; skipped: string[] } {
     const sig = dirSignature(dir);
     const cacheFile = join(dir, ".switchkeeper-cache.json");
-    // Warm path: files unchanged -> rebuild from the distilled JSON, no parsing.
-    try {
-      const c = JSON.parse(readFileSync(cacheFile, "utf8"));
-      if (c && c.sig && c.sig === sig && c.modules) {
-        resolved = new Map(Object.entries(c.modules) as [string, MibObject[]][]);
-        indexedNames = Array.isArray(c.indexed) ? c.indexed : [...resolved.keys()];
-        for (const n of c.skipped || []) dynamicBad.add(n);
-        symDirty = true;
-        return { loaded: resolved.size, skipped: c.skipped || [] };
-      }
-    } catch { /* no/stale cache -> cold parse */ }
+    const skipFile = join(dir, ".switchkeeper-skip");
+    if (loadDirFromCache(dir)) return { loaded: resolved.size, skipped: [...dynamicBad] };
 
     let files: string[] = [];
     try { files = readdirSync(dir); } catch { return { loaded: 0, skipped: [] }; }
@@ -357,21 +370,23 @@ export function createMibStore(): MibStore {
       const name = indexFile(join(dir, f));
       if (name) names.push(name); else skipped.push(f); // non-MIB files are skipped
     }
+    // Seed quarantine from a prior (possibly interrupted) run so discovery resumes, not restarts.
     const bad = new Set<string>();
     try {
-      for (const line of readFileSync(join(dir, ".switchkeeper-skip"), "utf8").split("\n")) {
+      for (const line of readFileSync(skipFile, "utf8").split("\n")) {
         const s = line.trim();
         if (s) bad.add(s);
       }
-    } catch { /* no cache yet */ }
+    } catch { /* no prior run */ }
     for (const n of bad) dynamicBad.add(n);
+    const persistSkip = () => { try { writeFileSync(skipFile, [...bad].join("\n") + "\n", "utf8"); } catch { /* */ } };
 
     const ordered = depthOrder(names);
     const loadGood = () => { for (const n of ordered) if (!bad.has(n)) loadModule(n); };
 
     loadGood();
     if (!canaryHealthy(store)) {
-      discoverPoisons(ordered, bad); // find culprits in throwaways
+      discoverPoisons(ordered, bad, persistSkip); // find culprits; persist each so a restart resumes
       resetStore(); // the first attempt left the real store corrupted; rebuild it clean
       loadGood();
     }
@@ -382,7 +397,7 @@ export function createMibStore(): MibStore {
     indexedNames = [...index.keys()];
     symDirty = true;
     const quarantined = [...skipped, ...bad];
-    try { writeFileSync(join(dir, ".switchkeeper-skip"), [...bad].join("\n") + "\n", "utf8"); } catch { /* */ }
+    persistSkip();
     try {
       writeFileSync(cacheFile, JSON.stringify({ sig, indexed: indexedNames, skipped: quarantined, modules: Object.fromEntries(resolved) }));
     } catch { /* */ }
@@ -412,6 +427,7 @@ export function createMibStore(): MibStore {
     indexDir,
     loadFile,
     loadDir,
+    loadDirFromCache,
     loadModule,
     // Serve from the distilled map (covers warm/cache loads); fall back to the live store.
     providers: (m: string) => resolved.get(m) ?? providersLive(m),
