@@ -55,7 +55,14 @@ ipcMain.handle("open:link", (_e, url) => {
 
 // ---- MIB loader: download pointers + import vendor MIBs (in-process MibStore) ----
 let mibStore = null;
-const ensureMibStore = () => (mibStore = mibStore || engine.createMibStore());
+const STD_MIB_DIR = path.join(__dirname, "..", "mcp", "mibs-std"); // bundled standard MIBs (dev path)
+const ensureMibStore = () => {
+  if (!mibStore) {
+    mibStore = engine.createMibStore();
+    try { mibStore.indexDir(STD_MIB_DIR); } catch { /* bundle not present (packaged build) */ }
+  }
+  return mibStore;
+};
 
 ipcMain.handle("mib:pointers", (_e, { enterprise, sysDescr } = {}) => {
   try { return { ok: true, data: engine.mibPointersFor(enterprise, sysDescr) }; } catch (e) { return fail(e); }

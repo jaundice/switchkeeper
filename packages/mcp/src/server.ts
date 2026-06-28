@@ -53,10 +53,12 @@ const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.s
 
 // --- server-side MIB store: user-uploaded MIBs persist in MIB_DIR and load on startup ---
 const MIB_DIR = process.env.SWITCHKEEPER_MIB_DIR || path.resolve(__dirname, "..", "..", "..", "mibs");
+const STD_MIB_DIR = path.resolve(__dirname, "..", "mibs-std"); // bundled standard IETF/IEEE MIBs
 let _mibStore: ReturnType<typeof createMibStore> | null = null;
 function mibStore() {
   if (!_mibStore) {
     _mibStore = createMibStore();
+    try { _mibStore.indexDir(STD_MIB_DIR); } catch { /* no bundle */ } // resolution base for uploads
     try {
       fs.mkdirSync(MIB_DIR, { recursive: true });
       for (const f of fs.readdirSync(MIB_DIR)) _mibStore.loadFile(path.join(MIB_DIR, f));
