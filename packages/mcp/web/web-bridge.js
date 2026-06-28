@@ -37,8 +37,28 @@
     openUrl: (url) => { window.open(url, "_blank", "noopener"); return Promise.resolve(); },
     openLink: (url) => { window.open(url, "_blank", "noopener"); return Promise.resolve(); },
     mibPointers: (req) => post("/api/mib-pointers", req),
-    mibStatus: () => Promise.resolve({ ok: true, data: { loaded: 0, indexed: 0 } }),
-    // MIB import uses the OS file picker; only the desktop app can do that.
-    importMib: () => Promise.resolve({ ok: false, error: "MIB import is available in the Switchkeeper desktop app." }),
+    mibStatus: async () => {
+      try { return await (await fetch("/api/mib-status")).json(); }
+      catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+    },
+    // Pick MIB file(s) in the browser and upload their text to the server.
+    importMib: () => new Promise((resolve) => {
+      const inp = document.createElement("input");
+      inp.type = "file";
+      inp.multiple = true;
+      inp.accept = ".mib,.txt,.my,.smi";
+      inp.style.display = "none";
+      document.body.appendChild(inp);
+      inp.addEventListener("change", async () => {
+        const files = Array.from(inp.files || []);
+        inp.remove();
+        if (!files.length) return resolve({ ok: true, data: { canceled: true } });
+        try {
+          const payload = await Promise.all(files.map(async (f) => ({ name: f.name, text: await f.text() })));
+          resolve(await post("/api/mib-import", { files: payload }));
+        } catch (e) { resolve({ ok: false, error: String((e && e.message) || e) }); }
+      });
+      inp.click();
+    }),
   };
 })();

@@ -22,6 +22,7 @@ import {
   profileForEnterprise,
   mibPointersFor,
   readTopology,
+  createMibStore,
 } from "../../engine/src/index.ts";
 import type { Credential, Edit } from "../../engine/src/index.ts";
 
@@ -49,6 +50,20 @@ function v2c(community?: string, writeCommunity?: string): Credential {
   return { protocol: "snmpV2c", readCommunity: community ?? "public", writeCommunity };
 }
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] });
+
+// --- server-side MIB store: user-uploaded MIBs persist in MIB_DIR and load on startup ---
+const MIB_DIR = process.env.SWITCHKEEPER_MIB_DIR || path.resolve(__dirname, "..", "..", "..", "mibs");
+let _mibStore: ReturnType<typeof createMibStore> | null = null;
+function mibStore() {
+  if (!_mibStore) {
+    _mibStore = createMibStore();
+    try {
+      fs.mkdirSync(MIB_DIR, { recursive: true });
+      for (const f of fs.readdirSync(MIB_DIR)) _mibStore.loadFile(path.join(MIB_DIR, f));
+    } catch { /* empty/new dir */ }
+  }
+  return _mibStore;
+}
 
 function buildServer(): McpServer {
   const server = new McpServer({ name: "switchkeeper", version: "0.1.0" });
@@ -92,7 +107,7 @@ const httpIdx = process.argv.indexOf("--http");
 if (httpIdx >= 0) {
   const port = Number(process.argv[httpIdx + 1] ?? 7341);
   const app = express();
-  app.use(express.json({ limit: "1mb" }));
+  app.use(express.json({ limit: "16mb" })); // MIB text uploads can be large
 
   // --- web UI (reuse the Electron renderer, transformed for the browser) ---
   let webHtml: string | null = null;
@@ -141,6 +156,26 @@ if (httpIdx >= 0) {
   app.get("/api/interfaces", (_req, res) => res.json({ ok: true, data: listInterfaces() }));
   app.post("/api/mib-pointers", wrap(async (b) => ({ ok: true, data: mibPointersFor(b.enterprise, b.sysDescr) })));
   app.post("/api/topology", wrap(async (b) => ({ ok: true, data: await readTopology(b.host, credFromWeb(b.cred)) })));
+  app.get("/api/mib-status", (_req, res) => {
+    const s = mibStore();
+    res.json({ ok: true, data: { loaded: s.loadedModules().length, indexed: s.indexedModules().length, dir: MIB_DIR } });
+  });
+  app.post("/api/mib-import", wrap(async (b) => {
+    const files: { name: string; text: string }[] = Array.isArray(b.files)
+      ? b.files
+      : (b.name && typeof b.text === "string" ? [{ name: b.name, text: b.text }] : []);
+    if (!files.length) return { ok: false, error: "no MIB files provided" };
+    fs.mkdirSync(MIB_DIR, { recursive: true });
+    const s = mibStore();
+    const imported: string[] = [];
+    for (const f of files) {
+      const safe = path.basename(String(f.name || "uploaded.mib")).replace(/[^\w.\-]/g, "_");
+      fs.writeFileSync(path.join(MIB_DIR, safe), String(f.text ?? ""), "latin1");
+      const mod = s.loadFile(path.join(MIB_DIR, safe));
+      if (mod) imported.push(mod);
+    }
+    return { ok: true, data: { imported, modules: s.loadedModules().length, indexed: s.indexedModules().length } };
+  }));
 
   // --- MCP endpoint (stateless) ---
   app.post("/mcp", async (req, res) => {
