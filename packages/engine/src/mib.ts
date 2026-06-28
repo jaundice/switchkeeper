@@ -125,6 +125,7 @@ export function createMibStore(): MibStore {
   let seen = new Set<string>(); // attempted (incl. unknown imports)
   let inprog = new Set<string>(); // cycle guard
   let symCache = new Map<string, MibObject>(); // symbol -> object (first definition wins)
+  let symDirty = true; // symCache needs (re)building from registered modules
   const dynamicBad = new Set<string>(); // modules found to poison net-snmp's parser
 
   // A poison can't be undone once loaded, so when one is found mid-scan we discard the store and
@@ -136,6 +137,7 @@ export function createMibStore(): MibStore {
     seen = new Set<string>();
     inprog = new Set<string>();
     symCache = new Map<string, MibObject>();
+    symDirty = true;
   }
 
   function indexFile(file: string): string | null {
@@ -171,8 +173,13 @@ export function createMibStore(): MibStore {
     return n;
   }
 
-  function cacheProviders(moduleName: string) {
-    for (const p of providers(moduleName)) if (!symCache.has(p.name)) symCache.set(p.name, p);
+  // Build the symbol -> OID cache from all registered modules. Done lazily (on first findOid after
+  // a load) rather than per-module during loading: getProvidersForModule is O(store size), so
+  // calling it for every module mid-load was quadratic and dominated load time on large sets.
+  function buildSymCache() {
+    symCache = new Map<string, MibObject>();
+    for (const m of registered) for (const p of providers(m)) if (!symCache.has(p.name)) symCache.set(p.name, p);
+    symDirty = false;
   }
 
   function loadModule(name: string): boolean {
@@ -205,7 +212,7 @@ export function createMibStore(): MibStore {
     seen.add(name);
     if (ok) {
       registered.add(name);
-      cacheProviders(name);
+      symDirty = true; // defer the (expensive) provider scan until findOid is actually called
     }
     return ok;
   }
@@ -338,7 +345,7 @@ export function createMibStore(): MibStore {
     loadDir,
     loadModule,
     providers,
-    findOid: (symbol: string) => symCache.get(symbol) || null,
+    findOid: (symbol: string) => { if (symDirty) buildSymCache(); return symCache.get(symbol) || null; },
     loadedModules: () => [...registered],
     indexedModules: () => [...index.keys()],
   };
