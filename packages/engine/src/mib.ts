@@ -239,17 +239,38 @@ export function createMibStore(): MibStore {
     return name;
   }
 
-  // Order modules so dependencies sort before the modules that import them. This keeps poison
-  // attribution clean (a poisonous dependency is judged before the modules that pull it in).
-  function depthOrder(names: string[]): string[] {
-    const score = (n: string) => {
-      const f = index.get(n);
-      if (!f) return 0;
-      let t = "";
-      try { t = readFileSync(f, "latin1"); } catch { /* */ }
-      return importsOf(t).filter((d) => index.has(d)).length;
+  // In-index import dependencies of a module (cached; reads each file once).
+  const depCache = new Map<string, string[]>();
+  function depsOf(name: string): string[] {
+    let d = depCache.get(name);
+    if (d) return d;
+    const f = index.get(name);
+    let t = "";
+    if (f) { try { t = readFileSync(f, "latin1"); } catch { /* */ } }
+    d = importsOf(t).filter((x) => index.has(x) && x !== name);
+    depCache.set(name, d);
+    return d;
+  }
+
+  // True topological order: every module's dependencies come strictly before it (post-order DFS,
+  // cycle-safe). Critical for poison discovery -- if deps don't precede a module, it loads with
+  // unresolved imports and net-snmp may flag IT as the poison, which then quarantines a dependency
+  // and cascades false positives through everything that imports it (and balloons the build time).
+  function topoOrder(names: string[]): string[] {
+    const out: string[] = [];
+    const done = new Set<string>();
+    const onstack = new Set<string>();
+    const visit = (n: string) => {
+      if (done.has(n) || !index.has(n)) return;
+      if (onstack.has(n)) return; // import cycle: break it
+      onstack.add(n);
+      for (const d of depsOf(n)) visit(d);
+      onstack.delete(n);
+      done.add(n);
+      out.push(n); // deps already pushed -> n comes after them
     };
-    return [...names].sort((a, b) => score(a) - score(b));
+    for (const n of names) visit(n);
+    return out;
   }
 
   // A cheap fingerprint of a directory's MIB files (name+size+mtime, stat only -- no reads). If it
@@ -381,7 +402,7 @@ export function createMibStore(): MibStore {
     for (const n of bad) dynamicBad.add(n);
     const persistSkip = () => { try { writeFileSync(skipFile, [...bad].join("\n") + "\n", "utf8"); } catch { /* */ } };
 
-    const ordered = depthOrder(names);
+    const ordered = topoOrder(names);
     const loadGood = () => { for (const n of ordered) if (!bad.has(n)) loadModule(n); };
 
     loadGood();
