@@ -61,7 +61,7 @@ function mibStore() {
     try { _mibStore.indexDir(STD_MIB_DIR); } catch { /* no bundle */ } // resolution base for uploads
     try {
       fs.mkdirSync(MIB_DIR, { recursive: true });
-      for (const f of fs.readdirSync(MIB_DIR)) _mibStore.loadFile(path.join(MIB_DIR, f));
+      _mibStore.loadDir(MIB_DIR); // loads all uploads, auto-skipping any that poison the parser
     } catch { /* empty/new dir */ }
   }
   return _mibStore;
@@ -173,10 +173,10 @@ if (httpIdx >= 0) {
     for (const f of files) {
       const safe = path.basename(String(f.name || "uploaded.mib")).replace(/[^\w.\-]/g, "_");
       fs.writeFileSync(path.join(MIB_DIR, safe), String(f.text ?? ""), "latin1");
-      const mod = s.loadFile(path.join(MIB_DIR, safe));
-      if (mod) imported.push(mod);
+      imported.push(safe);
     }
-    return { ok: true, data: { imported, modules: s.loadedModules().length, indexed: s.indexedModules().length } };
+    const r = s.loadDir(MIB_DIR); // probes + loads, auto-skipping any file that poisons the parser
+    return { ok: true, data: { imported, loaded: r.loaded, skipped: r.skipped.length, modules: s.loadedModules().length, indexed: s.indexedModules().length } };
   }));
 
   // --- MCP endpoint (stateless) ---

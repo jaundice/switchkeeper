@@ -10,8 +10,9 @@
 // logs "Can not find X"). So a naive directory load registers almost nothing. The
 // fix is a moduleName->file index plus a TOPOLOGICAL load that pulls each module's
 // import closure first. Validated against a 7,900-file real-world archive.
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import snmp from "net-snmp";
 
 export interface MibObject {
@@ -69,11 +70,40 @@ function isCorruptor(name: string): boolean {
   return CORRUPTORS.has(name) || name.startsWith("LLDP-EXT-");
 }
 
+// Beyond the static list above, vendor archives ship many MIBs that net-snmp's parser can't
+// handle (Extreme's are a notorious example); some of these don't just fail to parse, they
+// corrupt the store so EVERY later load fails. We detect them empirically with a "canary": a
+// trivial MIB that must register in a healthy store. After a candidate is loaded into a
+// throwaway store, if the canary no longer registers, that candidate poisoned the parser.
+const CANARY_FILE = join(tmpdir(), "switchkeeper-canary.mib");
+const CANARY_TEXT =
+  "SKCANARY-MIB DEFINITIONS ::= BEGIN\nIMPORTS OBJECT-TYPE, enterprises, Integer32 FROM SNMPv2-SMI;\n" +
+  "skCanary OBJECT-TYPE SYNTAX Integer32 MAX-ACCESS read-only STATUS current DESCRIPTION \"c\" ::= { enterprises 99998 }\nEND\n";
+let canaryWritten = false;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function canaryHealthy(probe: any): boolean {
+  if (!canaryWritten) {
+    try { writeFileSync(CANARY_FILE, CANARY_TEXT); } catch { /* */ }
+    canaryWritten = true;
+  }
+  return quiet(() => {
+    try {
+      probe.loadFromFile(CANARY_FILE);
+      const p = probe.getProvidersForModule("SKCANARY-MIB");
+      return !!(p && p.length);
+    } catch {
+      return false;
+    }
+  });
+}
+
 export interface MibStore {
   /** Recursively index a directory of MIB files (moduleName -> file). Returns count indexed. */
   indexDir(dir: string): number;
   /** Index + load a single MIB file (and its import closure). Returns the module name or null. */
   loadFile(file: string): string | null;
+  /** Load every MIB in a directory, auto-skipping files that poison the parser. */
+  loadDir(dir: string): { loaded: number; skipped: string[] };
   /** Load a module by name (resolving its IMPORTS closure from the index first). */
   loadModule(name: string): boolean;
   /** All objects (name/oid) defined by a loaded module. */
@@ -88,13 +118,25 @@ export interface MibStore {
 
 export function createMibStore(): MibStore {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const store: any = snmp.createModuleStore();
-  const baseNames = new Set<string>(store.getModuleNames(true));
+  let store: any = snmp.createModuleStore();
+  let baseNames = new Set<string>(store.getModuleNames(true));
   const index = new Map<string, string>(); // moduleName -> filepath
-  const registered = new Set<string>(); // modules that actually parsed/registered
-  const seen = new Set<string>(); // attempted (incl. unknown imports)
-  const inprog = new Set<string>(); // cycle guard
-  const symCache = new Map<string, MibObject>(); // symbol -> object (first definition wins)
+  let registered = new Set<string>(); // modules that actually parsed/registered
+  let seen = new Set<string>(); // attempted (incl. unknown imports)
+  let inprog = new Set<string>(); // cycle guard
+  let symCache = new Map<string, MibObject>(); // symbol -> object (first definition wins)
+  const dynamicBad = new Set<string>(); // modules found to poison net-snmp's parser
+
+  // A poison can't be undone once loaded, so when one is found mid-scan we discard the store and
+  // rebuild from scratch (the index survives; good modules get reloaded). dynamicBad persists.
+  function resetStore() {
+    store = snmp.createModuleStore();
+    baseNames = new Set<string>(store.getModuleNames(true));
+    registered = new Set<string>();
+    seen = new Set<string>();
+    inprog = new Set<string>();
+    symCache = new Map<string, MibObject>();
+  }
 
   function indexFile(file: string): string | null {
     let text: string;
@@ -135,7 +177,7 @@ export function createMibStore(): MibStore {
 
   function loadModule(name: string): boolean {
     if (baseNames.has(name) || registered.has(name)) return true;
-    if (isCorruptor(name)) { seen.add(name); return false; } // skip: would poison the store
+    if (isCorruptor(name) || dynamicBad.has(name)) { seen.add(name); return false; } // skip: poisons the store
     if (inprog.has(name)) return false; // cycle: dependency still loading
     const file = index.get(name);
     if (!file) {
@@ -175,6 +217,95 @@ export function createMibStore(): MibStore {
     return name;
   }
 
+  // Order modules so dependencies sort before the modules that import them. This keeps poison
+  // attribution clean (a poisonous dependency is judged before the modules that pull it in).
+  function depthOrder(names: string[]): string[] {
+    const score = (n: string) => {
+      const f = index.get(n);
+      if (!f) return 0;
+      let t = "";
+      try { t = readFileSync(f, "latin1"); } catch { /* */ }
+      return importsOf(t).filter((d) => index.has(d)).length;
+    };
+    return [...names].sort((a, b) => score(a) - score(b));
+  }
+
+  // Probe one candidate in ISOLATION: load its IMPORTS closure (deps first, known-bad excluded)
+  // into a THROWAWAY store, then check the canary. Returns true if the candidate poisons the
+  // parser. The throwaway store keeps the real store untouched while we hunt for the culprit.
+  function poisonsInIsolation(candidate: string, bad: Set<string>): boolean {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const probe: any = snmp.createModuleStore();
+    const pbase = new Set<string>(probe.getModuleNames(true));
+    const done = new Set<string>();
+    const inp = new Set<string>();
+    const loadInto = (n: string) => {
+      if (pbase.has(n) || done.has(n) || bad.has(n) || inp.has(n)) return;
+      const file = index.get(n);
+      if (!file) { done.add(n); return; }
+      inp.add(n);
+      let t = "";
+      try { t = readFileSync(file, "latin1"); } catch { /* */ }
+      for (const d of importsOf(t)) loadInto(d);
+      quiet(() => { try { probe.loadFromFile(file); } catch { /* */ } });
+      inp.delete(n);
+      done.add(n);
+    };
+    loadInto(candidate);
+    return !canaryHealthy(probe);
+  }
+
+  // Load every MIB in a directory, robust to files that poison net-snmp's parser. Some vendor
+  // MIBs (Extreme's are notorious) crash the parser so badly that EVERY later load fails -- one
+  // bad file would otherwise register zero modules. Strategy: load all the good ones, then check
+  // a canary. If the store is healthy (the common case: clean sets, or a cached quarantine list)
+  // we're done. If not, a poison slipped in: we discard the corrupted store, isolate the culprit(s)
+  // with per-file probes, then reload without them. The quarantine set is cached as
+  // ".switchkeeper-skip" in the dir so subsequent loads skip straight to a healthy store.
+  function loadDir(dir: string): { loaded: number; skipped: string[] } {
+    let files: string[] = [];
+    try { files = readdirSync(dir); } catch { return { loaded: 0, skipped: [] }; }
+    const skipped: string[] = [];
+    const names: string[] = [];
+    for (const f of files) {
+      if (f.startsWith(".")) continue; // our sidecar / dotfiles
+      const name = indexFile(join(dir, f));
+      if (name) names.push(name); else skipped.push(f); // non-MIB files are skipped
+    }
+    const skipFile = join(dir, ".switchkeeper-skip");
+    const bad = new Set<string>();
+    try {
+      for (const line of readFileSync(skipFile, "utf8").split("\n")) {
+        const s = line.trim();
+        if (s) bad.add(s);
+      }
+    } catch { /* no cache yet */ }
+    for (const n of bad) dynamicBad.add(n);
+
+    const ordered = depthOrder(names);
+    const startBad = bad.size;
+    const loadGood = () => { for (const n of ordered) if (!bad.has(n)) loadModule(n); };
+
+    loadGood();
+    // If a poison corrupted the store, hunt it down and rebuild. Bounded in case isolation can't
+    // pin a (rare) combination-only poison -- we still return a healthy store with what loaded.
+    for (let attempt = 0; attempt < 4 && !canaryHealthy(store); attempt++) {
+      let found = false;
+      for (const n of ordered) {
+        if (bad.has(n)) continue;
+        if (poisonsInIsolation(n, bad)) { bad.add(n); dynamicBad.add(n); found = true; }
+      }
+      resetStore(); // the previous store is corrupted; rebuild clean
+      loadGood();
+      if (!found) break; // isolation pinned nothing new; avoid looping
+    }
+
+    if (bad.size !== startBad) {
+      try { writeFileSync(skipFile, [...bad].join("\n") + "\n", "utf8"); } catch { /* */ }
+    }
+    return { loaded: registered.size, skipped: [...skipped, ...bad] };
+  }
+
   function providers(moduleName: string): MibObject[] {
     let raw: Array<{ name: string; oid?: string; scalarType?: number; maxAccess?: number }> = [];
     try {
@@ -196,6 +327,7 @@ export function createMibStore(): MibStore {
   return {
     indexDir,
     loadFile,
+    loadDir,
     loadModule,
     providers,
     findOid: (symbol: string) => symCache.get(symbol) || null,
