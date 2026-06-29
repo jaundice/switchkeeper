@@ -40,6 +40,9 @@
       button.secondary.active { background: var(--accent); color: #06101f; border-color: var(--accent); }
       .openui { color: var(--accent); text-decoration: none; }
       .openui:hover { text-decoration: underline; }
+      .remember { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 12px;
+        cursor: pointer; user-select: none; white-space: nowrap; }
+      .remember input[type=checkbox] { accent-color: var(--accent); }
       #status { color: var(--muted); margin-left: auto; }
       #status.spin::before { content: "\21bb"; display: inline-block; margin-right: 6px; animation: sp 0.8s linear infinite; }
       @keyframes sp { to { transform: rotate(360deg); } }
@@ -231,6 +234,9 @@
       <select id="version" title="SNMP version"><option value="v2c">v2c</option><option value="v3">v3</option></select>
       <input id="community" value="public" placeholder="community" />
       <input id="wcommunity" placeholder="write community" title="required to apply changes" />
+      <label id="rememberLbl" class="remember" title="Cache SNMP credentials per host in this browser/app so you don't retype them. Plaintext, local only — uncheck to opt out.">
+        <input type="checkbox" id="remember" checked /> Remember credentials
+      </label>
       <button id="connect">Read switch</button>
       <button id="refresh" class="secondary" title="Re-read the switch">&#x21bb; Refresh</button>
       <button id="discoverBtn" class="secondary" title="Scan the network for switches">Discover</button>

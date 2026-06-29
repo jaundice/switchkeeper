@@ -2,6 +2,26 @@
 // backed by fetch() to the server's /api endpoints, so the exact same renderer app.js runs
 // unchanged in the browser / as an installed PWA.
 (function () {
+  // Parse a fetch Response defensively. The server can briefly return an empty body or a
+  // non-JSON error page (timeout, proxy cut the connection, !ok status, server busy/unreachable).
+  // Calling r.json() blindly throws "Unexpected end of JSON input" and surfaces as a raw
+  // exception in the UI; instead we read the text first and turn any non-JSON body into a clean
+  // { ok:false, error } the renderer already knows how to display.
+  async function readJson(r) {
+    const text = await r.text();
+    if (text) {
+      try {
+        return JSON.parse(text);
+      } catch (_e) {
+        /* fall through to the structured error below */
+      }
+    }
+    return {
+      ok: false,
+      error: `${r.status} ${r.statusText}: empty or non-JSON response (server may be busy/unreachable)`,
+    };
+  }
+
   async function post(path, body) {
     try {
       const r = await fetch(path, {
@@ -9,7 +29,7 @@
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body || {}),
       });
-      return await r.json();
+      return await readJson(r);
     } catch (e) {
       return { ok: false, error: String((e && e.message) || e) };
     }
@@ -33,7 +53,7 @@
     objectMeta: (req) => post("/api/object-meta", req),
     interfaces: async () => {
       try {
-        return await (await fetch("/api/interfaces")).json();
+        return await readJson(await fetch("/api/interfaces"));
       } catch (e) {
         return { ok: false, error: String((e && e.message) || e) };
       }
@@ -48,7 +68,7 @@
     openLink: (url) => { window.open(url, "_blank", "noopener"); return Promise.resolve(); },
     mibPointers: (req) => post("/api/mib-pointers", req),
     mibStatus: async () => {
-      try { return await (await fetch("/api/mib-status")).json(); }
+      try { return await readJson(await fetch("/api/mib-status")); }
       catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
     },
     // Pick MIB file(s) in the browser and upload their text to the server.

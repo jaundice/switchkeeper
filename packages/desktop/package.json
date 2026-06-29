@@ -1,6 +1,6 @@
 {
   "name": "@switchkeeper/desktop",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "private": true,
   "description": "Switchkeeper Electron desktop app (self-contained; engine bundled in-process)",
   "homepage": "https://github.com/jaundice/switchkeeper#readme",

@@ -714,6 +714,117 @@ function exportSnapshot() {
   setStatus("exported capability snapshot");
 }
 
+// ====================================================================================
+// Credential caching (convenience for this trusted-LAN tool).
+//
+// SECURITY NOTE: SNMP community strings (and v3 keys) are credentials, and these are stored
+// in plaintext in window.localStorage. That is an intentional convenience trade-off for a
+// LAN admin tool run on the operator's own machine — there is a clearly-labelled "Remember
+// credentials" opt-out (default ON) that disables persistence and wipes the host's stored
+// entry. We never log credential values.
+//
+// Shape:
+//   localStorage "sk.creds"    = { "<host>": { version, community?, writeCommunity?, v3?:{...} } }
+//   localStorage "sk.lastHost" = "<host>"            (prefilled into the host field on load)
+//   localStorage "sk.remember" = "1" | "0"           (the checkbox state)
+// ====================================================================================
+const CREDS_KEY = "sk.creds";
+const LAST_HOST_KEY = "sk.lastHost";
+const REMEMBER_KEY = "sk.remember";
+
+// Tolerate environments without localStorage (or where access throws, e.g. blocked storage).
+function lsGet(key) {
+  try { return window.localStorage ? window.localStorage.getItem(key) : null; }
+  catch (_e) { return null; }
+}
+function lsSet(key, val) {
+  try { if (window.localStorage) window.localStorage.setItem(key, val); } catch (_e) { /* ignore */ }
+}
+function lsRemove(key) {
+  try { if (window.localStorage) window.localStorage.removeItem(key); } catch (_e) { /* ignore */ }
+}
+
+function loadCredsMap() {
+  const raw = lsGet(CREDS_KEY);
+  if (!raw) return {};
+  try {
+    const obj = JSON.parse(raw);
+    return obj && typeof obj === "object" ? obj : {};
+  } catch (_e) {
+    return {}; // corrupt/legacy value — start fresh rather than throw
+  }
+}
+function saveCredsMap(map) {
+  lsSet(CREDS_KEY, JSON.stringify(map || {}));
+}
+
+function rememberOn() {
+  const chk = $("remember");
+  return chk ? chk.checked : true;
+}
+
+// Persist the current host's credentials (or, when "Remember" is off, ensure they're not kept).
+function saveCurrentCreds() {
+  const host = $("host").value.trim();
+  if (host) lsSet(LAST_HOST_KEY, host);
+  if (!rememberOn()) { forgetHost(host); return; }
+  if (!host) return;
+  const map = loadCredsMap();
+  map[host] = getCred(); // {version, community?, writeCommunity?, v3?}
+  saveCredsMap(map);
+}
+
+// Remove a single host's stored credentials (used on opt-out).
+function forgetHost(host) {
+  if (!host) return;
+  const map = loadCredsMap();
+  if (host in map) { delete map[host]; saveCredsMap(map); }
+}
+
+// Prefill the version/community/write-community (+ v3) fields for a known host from the cache.
+function prefillCredsForHost(host) {
+  if (!host) return;
+  const c = loadCredsMap()[host];
+  if (!c) return;
+  $("version").value = c.version === "v3" ? "v3" : "v2c";
+  toggleVersion();
+  if (c.version === "v3") {
+    const v3 = c.v3 || {};
+    $("v3user").value = v3.user || "";
+    $("v3authproto").value = v3.authProto || "";
+    $("v3authkey").value = v3.authKey || "";
+    $("v3privproto").value = v3.privProto || "";
+    $("v3privkey").value = v3.privKey || "";
+  } else {
+    if (c.community != null) $("community").value = c.community;
+    $("wcommunity").value = c.writeCommunity || "";
+  }
+}
+
+// On load: restore the checkbox state, prefill the last-used host, and (if known) its creds.
+function initCredCache() {
+  const chk = $("remember");
+  if (chk) {
+    const pref = lsGet(REMEMBER_KEY);
+    chk.checked = pref == null ? true : pref === "1"; // default ON
+    chk.addEventListener("change", () => {
+      lsSet(REMEMBER_KEY, chk.checked ? "1" : "0");
+      // Turning the opt-out off should immediately drop the current host's stored creds.
+      if (!chk.checked) forgetHost($("host").value.trim());
+      else saveCurrentCreds();
+    });
+  }
+  const last = lsGet(LAST_HOST_KEY);
+  if (last && !$("host").value.trim()) $("host").value = last;
+  prefillCredsForHost($("host").value.trim());
+  // Prefill when the host field changes to a known host.
+  const hostEl = $("host");
+  if (hostEl) {
+    hostEl.addEventListener("change", () => prefillCredsForHost(hostEl.value.trim()));
+    hostEl.addEventListener("blur", () => prefillCredsForHost(hostEl.value.trim()));
+  }
+}
+
 function getCred() {
   if ($("version").value === "v3") {
     return {
@@ -746,6 +857,8 @@ async function connect() {
   $("connect").disabled = true;
   $("refresh").disabled = true;
   setStatus("reading " + host + " ...", "spin");
+  // Cache the credentials on Read (respects the "Remember" opt-out; also records last host).
+  saveCurrentCreds();
   try {
     const res = await window.switchkeeper.read({ host, cred: getCred() });
     if (!res.ok) {
@@ -1734,3 +1847,7 @@ $("saveBtn").addEventListener("click", saveConfig);
 $("version").addEventListener("change", toggleVersion);
 $("host").addEventListener("keydown", (e) => { if (e.key === "Enter") connect(); });
 $("community").addEventListener("keydown", (e) => { if (e.key === "Enter") connect(); });
+
+// Restore remembered credentials/host (and wire host-change prefill). Done last so all
+// referenced elements + helpers (toggleVersion, getCred) are defined.
+initCredCache();

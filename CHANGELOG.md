@@ -6,6 +6,30 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-06-29
+
+Stability hotfix plus browser-side credential convenience.
+
+### Fixed
+
+- **GETBULK walk crash**: a bulk PDU could carry a varbind with no/undefined OID; treating it as a
+  string threw from inside net-snmp's socket callback (outside the Promise scope), crashing the
+  whole MCP/web process and crash-looping the service — surfacing in the browser as
+  "Unexpected end of JSON input" (an empty body from the cut request). The walk now type-checks the
+  OID, wraps the callback in try/catch (falling back to the GETNEXT walk on failure), and the server
+  installs `uncaughtException`/`unhandledRejection` guards so a stray transport error logs instead
+  of killing the host.
+- **Resilient bridge parsing**: the web UI reads the response body as text and parses defensively, so
+  an empty/timed-out/non-JSON response shows a clear "server may be busy/unreachable" message rather
+  than a raw JSON-parse exception.
+
+### Added
+
+- **Remembered credentials (browser)**: the web/desktop UI caches SNMP credentials per host in
+  `localStorage` and prefills them when you return to a host, with a "Remember credentials" opt-out
+  (default on) that clears a host's stored entry when unchecked. Community strings/v3 keys are stored
+  in plaintext as a convenience for a trusted-LAN tool; the opt-out is there for shared machines.
+
 ## [0.4.1] - 2026-06-29
 
 Polish on the MIB-driven feature set.
