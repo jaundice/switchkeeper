@@ -11,7 +11,7 @@
 // fix is a moduleName->file index plus a TOPOLOGICAL load that pulls each module's
 // import closure first. Validated against a 7,900-file real-world archive.
 import { readFileSync, readdirSync, writeFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, basename } from "node:path";
 import { tmpdir } from "node:os";
 import snmp from "net-snmp";
 
@@ -367,6 +367,16 @@ export function createMibStore(): MibStore {
         resolved = new Map(Object.entries(c.modules) as [string, MibObject[]][]);
         indexedNames = Array.isArray(c.indexed) ? c.indexed : [...resolved.keys()];
         for (const n of c.skipped || []) dynamicBad.add(n);
+        // Restore the moduleName->file index so source-text reads (describeObject) work without a
+        // re-parse. New caches carry it; for older caches, re-index the dir (cheap: header scan, no
+        // net-snmp parsing) so the file map is still available.
+        if (c.files && typeof c.files === "object") {
+          for (const [m, fn] of Object.entries(c.files as Record<string, string>)) {
+            if (!index.has(m)) index.set(m, join(dir, fn));
+          }
+        } else {
+          try { indexDir(dir); } catch { /* */ }
+        }
         symDirty = true;
         return true;
       }
@@ -430,7 +440,11 @@ export function createMibStore(): MibStore {
     const quarantined = [...skipped, ...bad];
     persistSkip();
     try {
-      writeFileSync(cacheFile, JSON.stringify({ sig, indexed: indexedNames, skipped: quarantined, modules: Object.fromEntries(resolved) }));
+      // Persist the moduleName->file map (basenames, resolved against `dir` on load) so a warm load
+      // can read object source text (describeObject) without re-indexing.
+      const files: Record<string, string> = {};
+      for (const [m, f] of index) files[m] = basename(f);
+      writeFileSync(cacheFile, JSON.stringify({ sig, indexed: indexedNames, skipped: quarantined, files, modules: Object.fromEntries(resolved) }));
     } catch { /* */ }
     return { loaded: resolved.size, skipped: quarantined };
   }
