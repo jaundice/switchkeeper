@@ -189,6 +189,11 @@
       /* The cell editor lives in a full-width subrow; drop the cell padding so .objeditor controls it. */
       tr.celledrow > td { padding: 0; background: transparent; }
       tr.celledrow .objeditor { margin: 6px 0; }
+      /* --- Lazy tables: stub "Load rows" affordance for tables whose rows load on demand --- */
+      td.lazyload { white-space: nowrap; }
+      td.lazyload button.loadrows { background: none; border: 1px solid var(--line); color: var(--accent);
+        border-radius: 5px; padding: 1px 11px; font: inherit; font-size: 12px; cursor: pointer; margin-right: 8px; }
+      td.lazyload button.loadrows:hover { border-color: var(--accent); }
     </style>
   </head>
   <body>

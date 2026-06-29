@@ -891,6 +891,14 @@ const MOCK_CAPABILITIES = {
 
 let lastCaps = null; // cache so the Advanced toggle can re-render without re-fetching
 
+// Lazy-tables refactor: generic table sections now arrive as STUBS (table.lazy === true: columnMeta +
+// index present, rows:[]). We fetch a table's rows on demand when the user expands it, then cache the
+// loaded table per entry id for the session so re-expanding (or an Advanced-toggle re-render) doesn't
+// re-fetch. The loaded table is the SAME shape as a curated/eager table (rows + rowKeys filled, lazy
+// absent) so capDataTable renders it — and wires the existing per-cell editor — unchanged.
+const loadedTables = new Map(); // entry id -> loaded CapabilityTable (rows + rowKeys, lazy:false)
+const expandedTables = new Set(); // entry ids the user has expanded (so re-renders keep them open)
+
 // editable: when true (generic section + Advanced mode) each scalar gets an "Edit" affordance whose
 // click fetches object-meta and renders the type-aware widget. sectionId namespaces the row ids so
 // multiple sections coexist. Read-only objects (per the fetched MibSyntax.access) stay display-only.
@@ -956,6 +964,68 @@ function capDataTable(table, editable, sectionId) {
   return `<div class="scrollwrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
 }
 
+// Lazy-tables refactor: decide how to render a section's `table`.
+//  - Non-lazy (curated, or already-loaded) tables render exactly as before via capDataTable.
+//  - A STUB (table.lazy === true) whose rows we have NOT loaded renders just its header (column names)
+//    + the index note + a "Load rows" affordance; clicking it fetches the rows on demand (loadTableRows).
+//  - Once loaded (cached in loadedTables), the section renders the populated table via capDataTable —
+//    same code path as a curated table, so read-write cells get the EXISTING per-cell editor unchanged.
+// `editable`/`sectionId` are threaded straight through to capDataTable (cell editor wiring is identical).
+function capTableSection(section, editable, sectionId) {
+  const t = section.table || {};
+  // A loaded table (cache hit) takes the place of the stub: render its rows like any other table.
+  const cached = loadedTables.get(section.id);
+  if (cached) return capDataTable(cached, editable, sectionId);
+  // Non-lazy tables (curated / generic eager) render as today.
+  if (!t.lazy) return capDataTable(t, editable, sectionId);
+
+  // Lazy stub, not yet loaded: header + index note + Load button. The header lists the columns so the
+  // operator sees the table's shape before paying for the SNMP walk. data-entry carries the section id
+  // for the on-demand fetch; data-sec/data-editable let the click handler re-render this section.
+  const cols = t.columns || [];
+  const head = cols.map((c) => `<th>${esc(c)}</th>`).join("");
+  const note = t.index ? `<span class="empty"> · index: ${esc(t.index)}</span>` : "";
+  const colspan = Math.max(cols.length, 1);
+  return `<div class="scrollwrap"><table><thead><tr>${head}</tr></thead><tbody>` +
+    `<tr id="lazyrow_${esc(sectionId)}"><td colspan="${colspan}" class="lazyload">` +
+    `<button class="loadrows" data-entry="${esc(section.id)}" data-sec="${esc(sectionId)}"` +
+    ` data-editable="${editable ? "1" : ""}">Load rows</button>` +
+    `<span class="empty"> rows not loaded yet${note}</span>` +
+    `</td></tr></tbody></table></div>`;
+}
+
+// Fetch one lazy table's rows on demand, cache them for the session, and re-render the Details panel so
+// the (now non-lazy) table renders through capDataTable — wiring the EXISTING per-cell editor. Shows an
+// inline loading state on the row while the SNMP walk runs. Cache hit (loadedTables) short-circuits the
+// fetch on re-expand. On failure the row shows the error and the Load button stays available to retry.
+async function loadTableRows(entry, sectionId, editable, cell) {
+  if (loadedTables.has(entry)) { expandedTables.add(entry); renderCapabilities(lastCaps); return; }
+  if (cell) cell.innerHTML = '<span class="empty">loading rows…</span>';
+  const host = (lastCaps && lastCaps.host) || $("host").value.trim();
+  let res;
+  try {
+    res = await window.switchkeeper.tableRows({ host, cred: getCred(), entry });
+  } catch (e) {
+    res = { ok: false, error: String((e && e.message) || e) };
+  }
+  // data:null means the MIB store is still indexing (server returns {ok:true,data:null}); let the user retry.
+  const section = res && res.ok ? (res.data || null) : null;
+  const table = section && section.table;
+  if (!table) {
+    const why = res && res.ok ? "table not loaded (MIBs may still be indexing — try again)" : ("load error: " + ((res && res.error) || "no result"));
+    if (cell) {
+      cell.innerHTML = `<button class="loadrows" data-entry="${esc(entry)}" data-sec="${esc(sectionId)}"` +
+        ` data-editable="${editable ? "1" : ""}">Load rows</button> <span class="bad">${esc(why)}</span>`;
+      const b = cell.querySelector(".loadrows");
+      if (b) b.addEventListener("click", () => loadTableRows(b.dataset.entry, b.dataset.sec, !!b.dataset.editable, cell.closest("td")));
+    }
+    return;
+  }
+  loadedTables.set(entry, table); // session cache: re-expanding won't re-fetch
+  expandedTables.add(entry);
+  renderCapabilities(lastCaps); // re-render: the loaded table now flows through capDataTable + the cell editor
+}
+
 function renderCapabilities(model) {
   lastCaps = model;
   const panel = $("capabilities");
@@ -971,7 +1041,7 @@ function renderCapabilities(model) {
     const editable = s.kind === "generic" && advancedMode;
     let inner = "";
     if (s.scalars && s.scalars.length) inner += capScalarTable(s.scalars, editable, "s" + si);
-    if (s.table) inner += capDataTable(s.table, editable, "t" + si);
+    if (s.table) inner += capTableSection(s, editable, "t" + si);
     if (!inner) inner = '<p class="empty">no values reported</p>';
     return `<div class="capsection"><h2>${esc(s.title)}${gtag}</h2>${inner}</div>`;
   }).join("");
@@ -1009,6 +1079,11 @@ function renderCapabilities(model) {
   // Phase 4: wire each TABLE-CELL "Edit" button to open its inline cell editor (subrow).
   panel.querySelectorAll("button.cellbtn").forEach((btn) => {
     btn.addEventListener("click", () => openCellEditor(btn, btn.dataset));
+  });
+  // Lazy-tables refactor: wire each lazy table's "Load rows" button to fetch its rows on demand.
+  panel.querySelectorAll("button.loadrows").forEach((btn) => {
+    btn.addEventListener("click", () =>
+      loadTableRows(btn.dataset.entry, btn.dataset.sec, !!btn.dataset.editable, btn.closest("td")));
   });
 }
 
@@ -1308,6 +1383,10 @@ async function openCellEditor(btn, ds) {
 async function loadCapabilities() {
   const panel = $("capabilities");
   if (panel.style.display === "block") { panel.style.display = "none"; return; } // toggle off
+  // Fresh capability read: drop any rows loaded for a previous read/device so we don't show stale rows
+  // against a newly-fetched stub list. Tables reload on demand against the new model.
+  loadedTables.clear();
+  expandedTables.clear();
   setStatus("reading device details...", "spin");
   try {
     let model;

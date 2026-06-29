@@ -4,6 +4,7 @@ import {
   buildCuratedSections,
   buildGenericSections,
   buildGenericTableSections,
+  buildTableStub,
   scalarInstanceOid,
   type GenericTableCandidate,
 } from "../src/deviceCapabilities.ts";
@@ -172,6 +173,46 @@ test("buildGenericTableSections: a row key present in only one column still emit
 
 test("buildGenericTableSections: a table that returned no rows is dropped", () => {
   assert.deepEqual(buildGenericTableSections([tableCand()], new Map()), []);
+});
+
+// ---------------------------------------------------------------------------
+// Lazy-tables (Phase 4 perf): buildTableStub lists a table WITHOUT walking it (lazy:true, no rows),
+// vs buildGenericTableSections which is the loaded shape (rows + rowKeys filled, no lazy flag).
+// ---------------------------------------------------------------------------
+
+test("buildTableStub: lists columns/columnMeta/index with lazy:true and NO rows (no SNMP walk)", () => {
+  const cand = tableCand();
+  const stub = buildTableStub(cand, () => "ifIndex");
+  assert.equal(stub.kind, "generic");
+  assert.equal(stub.id, "acmePortCfgEntry");
+  // Columns + index note are present (cheap, from MIB structure) ...
+  assert.deepEqual(stub.table!.columns, ["acmePortCfgSpeed", "acmePortCfgName"]);
+  assert.equal(stub.table!.index, "ifIndex");
+  // ... columnMeta aligned to columns, carrying OID/access/base for the eventual cell editor ...
+  assert.equal(stub.table!.columnMeta!.length, 2);
+  assert.equal(stub.table!.columnMeta![0].oid, "1.3.6.1.4.1.99.1.1.1");
+  assert.equal(stub.table!.columnMeta![0].access, "read-write");
+  assert.equal(stub.table!.columnMeta![0].base, "enum");
+  // ... but rows are NOT loaded: the marker the UI keys off to show a "Load rows" affordance.
+  assert.equal(stub.table!.lazy, true);
+  assert.deepEqual(stub.table!.rows, []);
+  assert.deepEqual(stub.table!.rowKeys, []);
+});
+
+test("buildGenericTableSections: loaded shape has rows + rowKeys and is NOT lazy", () => {
+  const cand = tableCand();
+  const columnValues = new Map<string, Map<string, string | number | null>>([
+    ["1.3.6.1.4.1.99.1.1.1", new Map<string, string | number | null>([["1", 3], ["49", 2]])],
+    ["1.3.6.1.4.1.99.1.1.2", new Map<string, string | number | null>([["1", "g1"], ["49", "uplink"]])],
+  ]);
+  const [s] = buildGenericTableSections([cand], columnValues, () => "ifIndex");
+  // Same columns/columnMeta/index as the stub, but now rows ARE filled and there is no lazy flag.
+  assert.deepEqual(s.table!.columns, ["acmePortCfgSpeed", "acmePortCfgName"]);
+  assert.equal(s.table!.columnMeta!.length, 2);
+  assert.equal(s.table!.index, "ifIndex");
+  assert.deepEqual(s.table!.rowKeys, ["1", "49"]);
+  assert.deepEqual(s.table!.rows, [[3, "g1"], [2, "uplink"]]);
+  assert.equal(s.table!.lazy, undefined); // loaded, not a stub
 });
 
 test("scalarInstanceOid: appends .0 idempotently", () => {

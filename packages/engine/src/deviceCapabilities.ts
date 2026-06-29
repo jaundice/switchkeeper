@@ -363,6 +363,37 @@ export function buildGenericTableSections(
   return sections.sort((a, b) => a.title.localeCompare(b.title));
 }
 
+/**
+ * Build a STUB generic table section (lazy-tables; no SNMP). Same column-meta/index logic as
+ * buildGenericTableSections, but with NO rows: the capability read only LISTS the table (its columns,
+ * per-column meta, index note) and the client fetches rows on demand via readTable(). `lazy: true`
+ * marks it as not-yet-loaded so the UI shows a "Load rows" affordance. rows/rowKeys are empty.
+ */
+export function buildTableStub(
+  cand: GenericTableCandidate,
+  indexNote?: (entry: string) => string | undefined,
+): CapabilitySection {
+  const columnMeta: CapabilityColumnMeta[] = cand.columns.map((c) => ({
+    name: c.name,
+    oid: c.oid,
+    access: c.access,
+    base: c.base,
+  }));
+  return {
+    id: cand.entry,
+    title: cand.title,
+    kind: "generic",
+    table: {
+      columns: cand.columns.map((c) => c.name),
+      rows: [],
+      columnMeta,
+      rowKeys: [],
+      index: indexNote ? indexNote(cand.entry) : undefined,
+      lazy: true,
+    },
+  };
+}
+
 /** Numeric, dot-separated OID comparison (so "1.3.6.1.4.1.9.10" sorts after "1.3.6.1.4.1.9.2"). */
 function compareOid(a: string, b: string): number {
   const pa = a.split(".").map(Number);
@@ -378,10 +409,12 @@ function compareOid(a: string, b: string): number {
 
 /**
  * Read a live device and return the adaptive CapabilityModel. Curated sections come from the
- * existing DeviceState read (probe + readState) + topology (readTopology); generic sections
- * come from a bounded GET sweep of the device's vendor-MIB scalar leaves. Falls back gracefully:
- * with no vendor MIBs loaded, selectGenericCandidates is empty and only the standard curated
- * sections appear, matching today's behaviour. MUST NOT perform any SNMP SET.
+ * existing DeviceState read (probe + readState) + topology (readTopology); generic SCALAR sections
+ * come from a bounded GET sweep of the device's vendor-MIB scalar leaves. Generic TABLE sections are
+ * listed as STUBS only (lazy-tables) — NO table SNMP walk happens here; the client fetches a table's
+ * rows on demand via readTable(). Falls back gracefully: with no vendor MIBs loaded,
+ * selectGenericCandidates/selectGenericTables are empty and only the standard curated sections
+ * appear, matching today's behaviour. MUST NOT perform any SNMP SET.
  */
 export async function readDeviceCapabilities(
   host: string,
@@ -411,22 +444,17 @@ export async function readDeviceCapabilities(
     const values = await sweepScalars(client, candidates);
     const generic = buildGenericSections(candidates, values);
 
-    // Phase 4: generic TABLE sections. Enumerate vendor table columns (which providers omit), walk
-    // each column (bounded by count AND a wall-clock budget, read-only), assemble rows keyed by the
-    // shared instance suffix, attach columnMeta/rowKeys + a human index note. Only tables that
-    // returned rows are emitted. The whole block is guarded: tables are a best-effort enrichment, so
-    // any failure (or a slow device) degrades to "no tables" rather than sinking the capability read.
+    // Lazy-tables (Phase 4 perf): the capability read no longer WALKS vendor tables (that cost
+    // ≈15–18 s and a heavy SNMP load on big switches). It only LISTS them as STUB sections — columns,
+    // per-column meta and an index note, but rows=[] — and the client fetches a table's rows on demand
+    // via readTable()/POST /api/table when the user opens it. Enumeration is memoized + vendor-only, so
+    // listing stubs is cheap and does NO SNMP. Guarded: if enumeration somehow throws, degrade to no
+    // tables rather than sinking the read.
     let genericTables: CapabilitySection[] = [];
     try {
       const tableCands = selectGenericTables(mib, device.vendorEnterprise);
-      const columnValues = await sweepTableColumns(client, tableCands, Date.now() + TABLE_SWEEP_BUDGET_MS);
-      const indexNote = (entry: string): string | undefined => {
-        const cand = tableCands.find((c) => c.entry === entry);
-        if (!cand) return undefined;
-        const names = rowIndexNames(mib, cand.module, entry);
-        return names.length ? names.join(", ") : "raw";
-      };
-      genericTables = buildGenericTableSections(tableCands, columnValues, indexNote);
+      const indexNote = indexNoteFor(mib, tableCands);
+      genericTables = tableCands.map((cand) => buildTableStub(cand, indexNote));
     } catch {
       genericTables = [];
     }
@@ -443,6 +471,85 @@ export async function readDeviceCapabilities(
   } finally {
     client.close();
   }
+}
+
+/**
+ * Build the index-note closure shared by the stub-listing path and the loaded readTable path: for a
+ * table entry, the human note is its INDEX element names (e.g. "ifIndex" / "dot1qVlanIndex"), or
+ * "raw" when the entry has no parseable INDEX clause. Pure (rowIndexNames just scans module text).
+ */
+function indexNoteFor(
+  mib: MibStore,
+  cands: GenericTableCandidate[],
+): (entry: string) => string | undefined {
+  return (entry: string): string | undefined => {
+    const cand = cands.find((c) => c.entry === entry);
+    if (!cand) return undefined;
+    const names = rowIndexNames(mib, cand.module, entry);
+    return names.length ? names.join(", ") : "raw";
+  };
+}
+
+/**
+ * Lazy-tables on-demand walk: resolve ONE vendor table by its entry symbol and return its populated
+ * (non-lazy) CapabilitySection, or null if the device exposes no such table. Probes the device for
+ * its vendorEnterprise, selects the matching candidate, opens a read-only SnmpClient, walks just that
+ * table's columns (bounded by the TABLE_SWEEP_BUDGET_MS wall-clock budget), and builds the single
+ * section via the same buildGenericTableSections used by the eager path (so rows/columnMeta/rowKeys/
+ * index match exactly). Read-only — never SETs; closes the client in finally.
+ */
+export async function readTable(
+  host: string,
+  credential: Credential,
+  mib: MibStore,
+  entry: string,
+): Promise<CapabilitySection | null> {
+  const client = new SnmpClient(host, credential);
+  try {
+    // Probe for the enterprise so we scope to the device's own table candidates (same scoping the
+    // stub listing used), then find the one the caller asked for.
+    const { device } = await probe(client, host);
+    const cands = selectGenericTables(mib, device.vendorEnterprise);
+    const cand = cands.find((c) => c.entry === entry);
+    if (!cand) return null; // device doesn't expose this table -> nothing to load
+
+    const columnValues = await sweepTableColumns(client, [cand], Date.now() + TABLE_SWEEP_BUDGET_MS);
+    const indexNote = indexNoteFor(mib, cands);
+    // buildGenericTableSections drops a table that returned no rows; for a stub the caller still
+    // opened, return that empty-but-loaded shape rather than null so the UI shows "no rows" (not
+    // "table absent"). Rows filled, no lazy flag.
+    const [section] = buildGenericTableSections([cand], columnValues, indexNote);
+    return section ?? buildEmptyLoadedTable(cand, indexNote);
+  } finally {
+    client.close();
+  }
+}
+
+/** A loaded-but-empty table section: same shape as buildGenericTableSections output but with zero
+ *  rows (the table exists, the device just returned no entries). Not lazy — the rows ARE loaded. */
+function buildEmptyLoadedTable(
+  cand: GenericTableCandidate,
+  indexNote?: (entry: string) => string | undefined,
+): CapabilitySection {
+  const columnMeta: CapabilityColumnMeta[] = cand.columns.map((c) => ({
+    name: c.name,
+    oid: c.oid,
+    access: c.access,
+    base: c.base,
+  }));
+  return {
+    id: cand.entry,
+    title: cand.title,
+    kind: "generic",
+    table: {
+      columns: cand.columns.map((c) => c.name),
+      rows: [],
+      columnMeta,
+      rowKeys: [],
+      index: indexNote ? indexNote(cand.entry) : undefined,
+      // No `lazy` flag: the rows were walked, the table is simply empty on this device.
+    },
+  };
 }
 
 /** GET each candidate's scalar instance OID in bounded batches; return oid -> value for the
@@ -473,7 +580,7 @@ async function sweepScalars(
  * the instance suffix after the column base (what SnmpClient.column already keys by). Per-column
  * walk failures are swallowed so one bad column doesn't sink the whole table.
  */
-async function sweepTableColumns(
+export async function sweepTableColumns(
   client: SnmpClient,
   candidates: GenericTableCandidate[],
   deadline: number,

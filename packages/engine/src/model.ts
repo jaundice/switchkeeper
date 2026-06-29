@@ -307,6 +307,11 @@ export interface CapabilityTable {
   columnMeta?: CapabilityColumnMeta[];  // aligned to columns[]; present on generic editable tables
   rowKeys?: string[];                   // instance suffix per row, aligned to rows[] (e.g. "49" or "1.20")
   index?: string;                       // human note on the index, e.g. "ifIndex" / "dot1qVlan" / "raw"
+  // Lazy-tables (Phase 4 perf): true on a STUB section — columns/columnMeta/index are present but the
+  // rows are NOT walked (rows=[], rowKeys=[]). The capability read only LISTS vendor tables (cheap, no
+  // SNMP); the client fetches a table's rows on demand via readTable()/POST /api/table. Absent/false on
+  // a fully-loaded section (curated tables, or a table returned by readTable).
+  lazy?: boolean;
 }
 
 /**

@@ -67,6 +67,10 @@ export {
   // Phase 4: generic table selection + pure section builder.
   selectGenericTables,
   buildGenericTableSections,
+  // Lazy-tables (Phase 4 perf): stub builder for the listing path + on-demand single-table walk.
+  buildTableStub,
+  sweepTableColumns,
+  readTable,
   type GenericTableCandidate,
   type Topology,
 } from "./deviceCapabilities.ts";

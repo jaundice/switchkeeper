@@ -25,6 +25,7 @@ import {
   readTopology,
   createMibStore,
   readDeviceCapabilities,
+  readTable,
   describeObject,
 } from "../../engine/src/index.ts";
 import type { Credential, Edit, CapabilityModel } from "../../engine/src/index.ts";
@@ -179,6 +180,18 @@ function buildServer(): McpServer {
     }
     return ok(await readDeviceCapabilities(host, v2c(community), store));
   });
+  server.registerTool("switch_table", {
+    // Lazy-tables refactor: switch_capabilities now returns generic table STUBS (lazy:true, no rows).
+    // This loads ONE table's rows on demand — it walks just that table's columns (bounded) and
+    // returns the populated CapabilitySection. Read-only; never SETs. `entry` is the stub's id.
+    description: "Load the rows of ONE generic vendor table on demand (the capability model lists tables as " +
+      "lazy stubs without rows; this walks just that one table). entry is the table section's id. Read-only; no SETs.",
+    inputSchema: { host: z.string(), entry: z.string(), community: z.string().optional() },
+  }, async ({ host, entry, community }) => {
+    const store = mibStore(); // null while the MIB cache builds in the background
+    if (!store) return ok(null); // no store yet -> nothing to resolve the table against
+    return ok(await readTable(host, v2c(community), store, entry));
+  });
   return server;
 }
 
@@ -248,6 +261,16 @@ if (httpIdx >= 0) {
       return { ok: true, data, indexing: true };
     }
     return { ok: true, data: await readDeviceCapabilities(b.host, credFromWeb(b.cred), store) };
+  }));
+  // Lazy-tables refactor: load ONE generic table's rows on demand. /api/capabilities now returns each
+  // vendor table as a STUB (table.lazy === true, rows:[]) — the UI fetches the rows here when the user
+  // expands the table. readTable walks just that one table's columns (bounded, read-only) and returns
+  // the populated CapabilitySection. While the MIB cache is still building mibStore() is null, so we
+  // return data:null (the UI shows a "still indexing" state and lets the user retry).
+  app.post("/api/table", wrap(async (b) => {
+    const store = mibStore();
+    if (!store) return { ok: true, data: null };
+    return { ok: true, data: await readTable(b.host, credFromWeb(b.cred), store, b.entry) };
   }));
   // Phase 3: editor metadata for one object. The renderer calls this (Advanced mode) to learn an
   // object's SYNTAX (base type, enums, ranges, units, description, access) so it can build the

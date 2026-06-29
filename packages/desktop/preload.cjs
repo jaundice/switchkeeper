@@ -8,6 +8,9 @@ contextBridge.exposeInMainWorld("switchkeeper", {
   save: (req) => ipcRenderer.invoke("switch:save", req),
   topology: (req) => ipcRenderer.invoke("switch:topology", req),
   capabilities: (req) => ipcRenderer.invoke("switch:capabilities", req),
+  // Lazy-tables refactor: load one generic table's rows on demand ({host,cred,entry}). The capability
+  // model lists vendor tables as lazy stubs (no rows); the renderer calls this on first expand.
+  tableRows: (req) => ipcRenderer.invoke("switch:table", req),
   // Phase 3: fetch one object's MIB SYNTAX so the renderer can build a type-aware edit widget.
   objectMeta: (req) => ipcRenderer.invoke("switch:object-meta", req),
   openUrl: (url) => ipcRenderer.invoke("open:external", url),

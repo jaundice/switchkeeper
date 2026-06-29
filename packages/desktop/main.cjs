@@ -40,6 +40,13 @@ ipcMain.handle("switch:topology", async (_e, { host, cred }) => {
 ipcMain.handle("switch:capabilities", async (_e, { host, cred }) => {
   try { return { ok: true, data: await engine.readDeviceCapabilities(host, credFromWeb(cred), ensureMibStore()) }; } catch (e) { return fail(e); }
 });
+// Lazy-tables refactor: load ONE generic table's rows on demand. readDeviceCapabilities now lists
+// vendor tables as STUBS (table.lazy === true, no rows); the renderer calls this when the user
+// expands a table. readTable walks just that one table's columns (bounded, read-only) and returns
+// the populated CapabilitySection. Uses the desktop's in-process MibStore to resolve the table.
+ipcMain.handle("switch:table", async (_e, { host, cred, entry }) => {
+  try { return { ok: true, data: await engine.readTable(host, credFromWeb(cred), ensureMibStore(), entry) }; } catch (e) { return fail(e); }
+});
 // Phase 3: editor metadata for one writable object. Uses the desktop's in-process MibStore so the
 // renderer (Advanced mode) can build a type-aware edit widget from the object's MIB SYNTAX. No
 // device needed. Returns data:null if the object can't be resolved (renderer falls back to text).

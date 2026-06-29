@@ -24,6 +24,10 @@
     save: (req) => post("/api/save", req),
     topology: (req) => post("/api/topology", req),
     capabilities: (req) => post("/api/capabilities", req),
+    // Lazy-tables refactor: fetch one generic table's rows on demand ({host,cred,entry}). The
+    // capability model lists vendor tables as lazy stubs (no rows); the renderer calls this when the
+    // user expands a table. Returns { ok, data: CapabilitySection|null } (null while the store builds).
+    tableRows: (req) => post("/api/table", req),
     // Phase 3: fetch one object's MIB SYNTAX ({name?,oid?}) so the renderer can build a type-aware
     // edit widget. Returns { ok, data: MibSyntax|null } (null while the MIB store is still building).
     objectMeta: (req) => post("/api/object-meta", req),
