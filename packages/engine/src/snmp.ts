@@ -93,29 +93,41 @@ export class SnmpClient {
    */
   walkBulk(baseOid: string, maxRepetitions = 20): Promise<VarBind[]> {
     const base = baseOid.endsWith(".") ? baseOid.slice(0, -1) : baseOid;
-    const underBase = (oid: string) => oid === base || oid.startsWith(base + ".");
+    // Guard: a bulk PDU can carry a varbind with no/empty oid (terminating/edge cases). Treating an
+    // undefined oid as a string crashed the whole process from inside the socket callback, so check
+    // the type explicitly and treat anything non-string as "not under base" (ends the walk).
+    const underBase = (oid?: string): boolean =>
+      typeof oid === "string" && (oid === base || oid.startsWith(base + "."));
     return new Promise((resolve, reject) => {
       const out: VarBind[] = [];
       const step = (from: string) => {
         // getBulk(oids, nonRepeaters, maxRepetitions, cb): 0 non-repeaters, page of maxRepetitions.
         this.readSession.getBulk([from], 0, maxRepetitions, (err: Error | null, varbinds: any[]) => {
-          if (err) return reject(err);
-          let last = from;
-          let done = false;
-          for (const vb of varbinds) {
-            // endOfMibView (130) ends the walk; other per-varbind errors (noSuchObject/Instance) are
-            // skipped but we keep paging from the last good OID.
-            if (snmp.isVarbindError(vb)) {
-              if (vb.type === 130) { done = true; break; }
-              continue;
+          // The callback runs in net-snmp's socket handler, OUTSIDE this Promise's try scope: any
+          // throw here would be an uncaught exception that kills the process. Wrap defensively and
+          // turn failures into a rejection (column() then falls back to the GETNEXT walk).
+          try {
+            if (err) return reject(err);
+            let last = from;
+            let done = false;
+            for (const vb of varbinds || []) {
+              // endOfMibView (130) ends the walk; other per-varbind errors (noSuchObject/Instance) are
+              // skipped but we keep paging from the last good OID.
+              if (snmp.isVarbindError(vb)) {
+                if (vb.type === 130) { done = true; break; }
+                continue;
+              }
+              if (!vb || typeof vb.oid !== "string") continue; // malformed varbind -> skip, keep paging
+              if (!underBase(vb.oid)) { done = true; break; }
+              out.push(toVarBind(vb));
+              last = vb.oid;
             }
-            if (!underBase(vb.oid)) { done = true; break; }
-            out.push(toVarBind(vb));
-            last = vb.oid;
+            // No progress (agent returned nothing new under base) -> stop, else page from the last OID.
+            if (done || !varbinds || varbinds.length === 0 || last === from) return resolve(out);
+            step(last);
+          } catch (e) {
+            reject(e instanceof Error ? e : new Error(String(e)));
           }
-          // No progress (agent returned nothing new under base) -> stop, else page from the last OID.
-          if (done || varbinds.length === 0 || last === from) return resolve(out);
-          step(last);
         });
       };
       step(base);

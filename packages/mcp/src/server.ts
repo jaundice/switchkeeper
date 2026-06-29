@@ -197,6 +197,11 @@ function buildServer(): McpServer {
 
 const httpIdx = process.argv.indexOf("--http");
 if (httpIdx >= 0) {
+  // Long-running HTTP server: a stray error from an async SNMP socket callback (e.g. a malformed
+  // bulk varbind) must NOT take the process down and crash-loop the service. Log and keep serving;
+  // individual requests still surface their own errors as JSON via `wrap`.
+  process.on("uncaughtException", (e) => console.error("[uncaughtException]", e));
+  process.on("unhandledRejection", (e) => console.error("[unhandledRejection]", e));
   const port = Number(process.argv[httpIdx + 1] ?? 7341);
   const app = express();
   app.use(express.json({ limit: "16mb" })); // MIB text uploads can be large
