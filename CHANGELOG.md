@@ -6,6 +6,30 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-06-29
+
+Polish on the MIB-driven feature set.
+
+### Added
+
+- **BITS editing**: BITS objects parse into named-bit checkboxes (one per bit position); selections
+  encode to the SNMP octet string and go through the normal safety-gated write path.
+- **Change history**: an in-session log of applied change-sets (edit, old→new, classification, result).
+- **Snapshot/export**: download the current capability model (curated + scalars + loaded tables) as JSON.
+- **Tooltips + search**: MIB description/units surface as tooltips on read-only displays, and a
+  filter box narrows the generic sections on a busy device.
+- **Rollback-timer hook**: an optional, inert `VendorProfile.commitConfirm` extension point (no
+  vendor values ship) for hardware that supports an SNMP arm/confirm rollback.
+- **Mock-device integration test** covering the live capability/plan path without hardware.
+
+### Changed
+
+- **Faster table loads**: on-demand table reads use SNMP GETBULK (with a GETNEXT fallback), cutting
+  round-trips on big per-port tables.
+- **Wider safe cell editing**: the row decoder maps more INDEX shapes (bridge-port, leading
+  ifIndex/VLAN with trailing parts) back to a port/VLAN, so more per-row writes are precisely
+  classified by the SafetyEngine.
+
 ## [0.4.0] - 2026-06-29
 
 MIB-driven device model and adaptive UI — read and (safely) manage whatever a switch's own
