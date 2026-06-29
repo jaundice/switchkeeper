@@ -29,6 +29,22 @@ export { mibPointersFor, mibSearchUrl, hasCuratedMibSource, type MibSource, type
 export { readFdb, readLldpNeighbors, macFromIndexTail, lldpLocalPortFromIndex } from "./topology.ts";
 export { saveConfigVarbinds } from "./save.ts";
 export { type SaveMethod } from "./profiles.ts";
+// MIB-driven model (Phase 1): resolver + adaptive capability model. Types come via model.ts.
+export {
+  createObjectResolver,
+  resolvedFromMibObject,
+  accessFromMaxAccess,
+  typeFromScalarType,
+  type ObjectResolver,
+} from "./objectResolver.ts";
+export {
+  readDeviceCapabilities,
+  buildCuratedSections,
+  buildGenericSections,
+  selectGenericCandidates,
+  scalarInstanceOid,
+  type Topology,
+} from "./deviceCapabilities.ts";
 
 import { SnmpClient } from "./snmp.ts";
 import { probe } from "./capabilities.ts";

@@ -195,6 +195,8 @@ function renderAll() {
   renderDevice(lastState.device);
   const tp = $("topology");
   if (tp) { tp.style.display = "none"; tp.innerHTML = ""; } // clear stale topology on re-read
+  const cp = $("capabilities");
+  if (cp) { cp.style.display = "none"; cp.innerHTML = ""; } // clear stale device details on re-read
   $("content").innerHTML = vlanTable(lastState.vlans) + renderPorts(lastState.ports);
   document.querySelectorAll("select.pvid").forEach((sel) => {
     sel.addEventListener("change", () => {
@@ -468,9 +470,178 @@ function renderTopology(data) {
     (fdb.length > cap ? `<div class="empty">showing first ${cap} of ${fdb.length}</div>` : "");
 }
 
+// ====================================================================================
+// Device details / Capabilities (MIB-driven adaptive view) — Phase 1, READ-ONLY.
+// Renders CapabilityModel.sections in order: curated sections always show; generic
+// sections (kind:"generic") are hidden unless Advanced mode is ON. No edit controls.
+// ====================================================================================
+
+// --- INTEGRATION FLAG ----------------------------------------------------------------
+// Set to true to render the bundled MOCK_CAPABILITIES fixture (UI dev without a device);
+// false calls the live window.switchkeeper.capabilities(). Live is the shipped default.
+const CAPS_USE_MOCK = false;
+// -------------------------------------------------------------------------------------
+
+// Advanced mode: off by default, persisted in-memory for the session only (per spec).
+let advancedMode = false;
+
+// A realistic CapabilityModel fixture matching the Phase-1 contract shape:
+// one curated scalar section (system), one curated table section (ports), one generic section.
+const MOCK_CAPABILITIES = {
+  host: "192.168.1.10",
+  vendor: "Netgear",
+  mibs: { loaded: 7, indexed: 312 },
+  sections: [
+    {
+      id: "system",
+      title: "System & Inventory",
+      kind: "curated",
+      scalars: [
+        { name: "sysName", oid: "1.3.6.1.2.1.1.5.0", value: "core-sw-01", type: "DisplayString" },
+        { name: "sysDescr", oid: "1.3.6.1.2.1.1.1.0", value: "Netgear GS748Tv5 ProSafe 48-port", type: "DisplayString" },
+        { name: "model", oid: "1.3.6.1.2.1.47.1.1.1.1.13.1", value: "GS748Tv5", type: "DisplayString" },
+        { name: "serialNumber", oid: "1.3.6.1.2.1.47.1.1.1.1.11.1", value: "4ML1234A56789", type: "DisplayString" },
+        { name: "firmwareVersion", oid: "1.3.6.1.2.1.47.1.1.1.1.10.1", value: "6.3.1.18", type: "DisplayString" },
+        { name: "sysUpTime", oid: "1.3.6.1.2.1.1.3.0", value: "41 days, 02:13:55", type: "TimeTicks" },
+      ],
+    },
+    {
+      id: "ports",
+      title: "Ports",
+      kind: "curated",
+      table: {
+        columns: ["ifIndex", "Name", "Admin", "Oper", "Speed (Mb/s)"],
+        rows: [
+          [1, "g1", "up", "up", 1000],
+          [2, "g2", "up", "down", null],
+          [3, "g3", "down", "down", null],
+          [48, "g48 (uplink)", "up", "up", 1000],
+        ],
+      },
+    },
+    {
+      id: "POWER-ETHERNET-MIB",
+      title: "PoE (Power-over-Ethernet)",
+      kind: "curated",
+      scalars: [
+        { name: "pethMainPseUsageThreshold", oid: "1.3.6.1.2.1.105.1.3.1.1.4.1", value: 90, type: "Integer32" },
+        { name: "pethMainPseConsumptionPower", oid: "1.3.6.1.2.1.105.1.3.1.1.4.1", value: 73, type: "Gauge32" },
+      ],
+    },
+    {
+      // Generic catch-all section: rendered identically but gated behind Advanced mode.
+      id: "NETGEAR-FAN-MIB",
+      title: "Vendor objects · NETGEAR-FAN-MIB",
+      kind: "generic",
+      table: {
+        columns: ["fanIndex", "fanDescription", "fanState", "fanSpeedRpm"],
+        rows: [
+          [1, "Fan tray 1", "operational", 4200],
+          [2, "Fan tray 2", "operational", 4180],
+        ],
+      },
+    },
+    {
+      id: "NETGEAR-ENVIRONMENT-MIB",
+      title: "Vendor objects · NETGEAR-ENVIRONMENT-MIB",
+      kind: "generic",
+      scalars: [
+        { name: "ngTemperatureCelsius", oid: "1.3.6.1.4.1.4526.10.43.1.6.1.3.1", value: 38, type: "Integer32" },
+        { name: "ngPsuStatus", oid: "1.3.6.1.4.1.4526.10.43.1.5.1.4.1", value: "ok", type: "DisplayString" },
+      ],
+    },
+  ],
+};
+
+let lastCaps = null; // cache so the Advanced toggle can re-render without re-fetching
+
+function capScalarTable(scalars) {
+  const rows = (scalars || []).map((s) => {
+    const v = s.value === null || s.value === undefined || s.value === ""
+      ? '<span class="empty">-</span>' : esc(s.value);
+    const t = s.type ? ` <span class="empty">(${esc(s.type)})</span>` : "";
+    return `<tr><th title="${esc(s.oid || "")}">${esc(s.name)}</th><td class="val">${v}</td></tr>`;
+  }).join("");
+  return `<table class="kv-table"><tbody>${rows}</tbody></table>`;
+}
+
+function capDataTable(table) {
+  const head = (table.columns || []).map((c) => `<th>${esc(c)}</th>`).join("");
+  const body = (table.rows || []).map((row) =>
+    "<tr>" + (row || []).map((cell) =>
+      (cell === null || cell === undefined || cell === "")
+        ? '<td class="empty">-</td>'
+        : (typeof cell === "number" ? `<td class="num">${esc(cell)}</td>` : `<td>${esc(cell)}</td>`)
+    ).join("") + "</tr>"
+  ).join("");
+  return `<div class="scrollwrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+}
+
+function renderCapabilities(model) {
+  lastCaps = model;
+  const panel = $("capabilities");
+  const sections = model.sections || [];
+  const generic = sections.filter((s) => s.kind === "generic");
+  // Curated sections always render; generic ones only when Advanced mode is on.
+  const visible = sections.filter((s) => s.kind !== "generic" || advancedMode);
+
+  const sectionHtml = visible.map((s) => {
+    const gtag = s.kind === "generic" ? ` <span class="gtag">generic</span>` : "";
+    let inner = "";
+    if (s.scalars && s.scalars.length) inner += capScalarTable(s.scalars);
+    if (s.table) inner += capDataTable(s.table);
+    if (!inner) inner = '<p class="empty">no values reported</p>';
+    return `<div class="capsection"><h2>${esc(s.title)}${gtag}</h2>${inner}</div>`;
+  }).join("");
+
+  const advClass = advancedMode ? "advtoggle on" : "advtoggle";
+  const hiddenNote = (!advancedMode && generic.length)
+    ? `<span class="sum">${generic.length} vendor section${generic.length === 1 ? "" : "s"} hidden</span>` : "";
+  const mibs = model.mibs || { loaded: 0, indexed: 0 };
+
+  panel.innerHTML =
+    `<div class="capbar">
+       <span class="sum">vendor <b>${esc(model.vendor || "Unknown")}</b></span>
+       <span class="sum">MIBs loaded <b>${esc(mibs.loaded ?? 0)}</b> · indexed <b>${esc(mibs.indexed ?? 0)}</b></span>
+       ${hiddenNote}
+       <span class="spacer"></span>
+       <label class="${advClass}" title="Show generic vendor objects exposed by the device's MIBs (read-only)">
+         <input type="checkbox" id="advChk" ${advancedMode ? "checked" : ""}> Advanced mode
+       </label>
+     </div>` +
+    (advancedMode ? `<div class="advbanner">Advanced mode ON — showing all generic vendor objects the MIBs expose (read-only).</div>` : "") +
+    (sections.length ? sectionHtml : `<p class="empty" style="margin-top:14px">No capability sections${mibs.loaded ? "" : " (no MIBs loaded — import the device's MIBs to see vendor objects)"}.</p>`);
+
+  const chk = $("advChk");
+  if (chk) chk.addEventListener("change", () => { advancedMode = chk.checked; renderCapabilities(lastCaps); });
+}
+
+async function loadCapabilities() {
+  const panel = $("capabilities");
+  if (panel.style.display === "block") { panel.style.display = "none"; return; } // toggle off
+  setStatus("reading device details...", "spin");
+  try {
+    let model;
+    if (CAPS_USE_MOCK) {
+      // Mock path — lets the full UI render before the engine lands. Flip CAPS_USE_MOCK above.
+      model = { ...MOCK_CAPABILITIES, host: $("host").value.trim() || MOCK_CAPABILITIES.host };
+    } else {
+      const res = await window.switchkeeper.capabilities({ host: $("host").value.trim(), cred: getCred() });
+      if (!res || !res.ok) { setStatus("details error: " + ((res && res.error) || "no result"), "error"); return; }
+      model = res.data || { host: "", vendor: "", mibs: { loaded: 0, indexed: 0 }, sections: [] };
+    }
+    renderCapabilities(model);
+    panel.style.display = "block";
+    setStatus("device details loaded" + (CAPS_USE_MOCK ? " (mock)" : ""));
+  } catch (e) {
+    setStatus("details error: " + ((e && e.message) || e), "error");
+  }
+}
+
 $("connect").addEventListener("click", connect);
 $("refresh").addEventListener("click", connect);
 $("topoBtn").addEventListener("click", loadTopology);
+$("capBtn").addEventListener("click", loadCapabilities);
 $("discoverBtn").addEventListener("click", openDiscover);
 $("saveBtn").addEventListener("click", saveConfig);
 $("version").addEventListener("change", toggleVersion);

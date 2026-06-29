@@ -21,6 +21,7 @@
     apply: (req) => post("/api/apply", req),
     save: (req) => post("/api/save", req),
     topology: (req) => post("/api/topology", req),
+    capabilities: (req) => post("/api/capabilities", req),
     interfaces: async () => {
       try {
         return await (await fetch("/api/interfaces")).json();

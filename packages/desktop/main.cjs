@@ -33,6 +33,11 @@ ipcMain.handle("switch:save", async (_e, { host, cred }) => {
 ipcMain.handle("switch:topology", async (_e, { host, cred }) => {
   try { return { ok: true, data: await engine.readTopology(host, credFromWeb(cred)) }; } catch (e) { return fail(e); }
 });
+// Adaptive MIB-driven capability model. Uses the desktop's in-process MibStore (ensureMibStore),
+// so generic vendor sections appear once the user has imported the device's MIBs. Read-only.
+ipcMain.handle("switch:capabilities", async (_e, { host, cred }) => {
+  try { return { ok: true, data: await engine.readDeviceCapabilities(host, credFromWeb(cred), ensureMibStore()) }; } catch (e) { return fail(e); }
+});
 ipcMain.handle("net:interfaces", async () => {
   try { return { ok: true, data: engine.listInterfaces() }; } catch (e) { return fail(e); }
 });

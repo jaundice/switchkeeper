@@ -195,3 +195,59 @@ export interface FdbEntry {
   bridgePort: number;
   vlan?: number; // Q-BRIDGE fdbId/VLAN (absent on the BRIDGE-MIB fallback)
 }
+
+// ---- MIB-driven model (Phase 1): resolver + adaptive capability model ----
+// Shapes pinned by docs/specs/phase1-contract.md. Both the engine and the surfaces/UI
+// layer depend on these exact shapes, so they live here (re-exported from index.ts).
+
+/** SNMP MAX-ACCESS, normalised. "unknown" when the MIB didn't state one. */
+export type ObjectAccess = "read-only" | "read-write" | "not-accessible" | "unknown";
+
+/**
+ * A symbol resolved to an OID + metadata, carrying its provenance so the UI knows
+ * whether the object came from the device's own vendor MIBs, the standard baseline,
+ * or a hand-coded vendor profile.
+ */
+export interface ResolvedObject {
+  name: string; // symbol, e.g. "extremePortName" or "ifName"
+  oid: string; // numeric OID (no trailing instance)
+  module: string; // defining MIB module, or "standard" / a profile name
+  source: "device-mib" | "standard" | "profile";
+  type?: string; // human SYNTAX label if known (e.g. "Integer32", "DisplayString")
+  access?: ObjectAccess; // from MIB MAX-ACCESS where known
+}
+
+/** One displayed scalar value. */
+export interface CapabilityValue {
+  name: string; // label (symbol or friendly name)
+  oid: string; // fully-qualified OID that was read (scalar instance, e.g. ".0")
+  value: string | number | null;
+  type?: string;
+}
+
+/** A displayed table (rows of cells), columns describing each cell. */
+export interface CapabilityTable {
+  columns: string[];
+  rows: (string | number | null)[][];
+}
+
+/**
+ * One UI section. Only emitted when it actually has content for this device.
+ * "curated" sections are the hand-bound categories (System, Ports, ...); "generic"
+ * sections are auto-built per vendor MIB module and gated behind Advanced mode.
+ */
+export interface CapabilitySection {
+  id: string; // "system" | "ports" | "vlans" | "poe" | "sensors" | "lldp" | "lag" | "stacking" | <module>
+  title: string; // human title
+  kind: "curated" | "generic";
+  scalars?: CapabilityValue[];
+  table?: CapabilityTable;
+}
+
+/** The whole adaptive model the UI renders. Sections in display order: curated first, then generic. */
+export interface CapabilityModel {
+  host: string;
+  vendor: string; // profile name or "Unknown"
+  mibs: { loaded: number; indexed: number }; // 0/0 if no MIBs loaded
+  sections: CapabilitySection[];
+}

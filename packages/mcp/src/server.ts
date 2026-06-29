@@ -24,8 +24,9 @@ import {
   mibPointersFor,
   readTopology,
   createMibStore,
+  readDeviceCapabilities,
 } from "../../engine/src/index.ts";
-import type { Credential, Edit } from "../../engine/src/index.ts";
+import type { Credential, Edit, CapabilityModel } from "../../engine/src/index.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rendererDir = path.join(__dirname, "..", "..", "desktop", "renderer");
@@ -124,6 +125,17 @@ function buildServer(): McpServer {
     description: "Read LLDP neighbours and the forwarding database (MAC->port) from a switch, for uplink/trunk discovery (a port with many MACs is an uplink).",
     inputSchema: { host: z.string(), community: z.string().optional() },
   }, async ({ host, community }) => ok(await readTopology(host, v2c(community))));
+  server.registerTool("switch_capabilities", {
+    description: "Read a device's adaptive capability model: curated sections (system/ports/vlans/poe/sensors/…) plus generic vendor objects the loaded MIBs expose. Read-only; no SETs.",
+    inputSchema: { host: z.string(), community: z.string().optional() },
+  }, async ({ host, community }) => {
+    const store = mibStore(); // null while the MIB cache builds in the background
+    if (!store) {
+      const data: CapabilityModel = { host, vendor: "", mibs: { loaded: 0, indexed: 0 }, sections: [] };
+      return ok(data); // valid empty model; caller can retry once indexing completes
+    }
+    return ok(await readDeviceCapabilities(host, v2c(community), store));
+  });
   return server;
 }
 
@@ -180,6 +192,18 @@ if (httpIdx >= 0) {
   app.get("/api/interfaces", (_req, res) => res.json({ ok: true, data: listInterfaces() }));
   app.post("/api/mib-pointers", wrap(async (b) => ({ ok: true, data: mibPointersFor(b.enterprise, b.sysDescr) })));
   app.post("/api/topology", wrap(async (b) => ({ ok: true, data: await readTopology(b.host, credFromWeb(b.cred)) })));
+  // Adaptive device model (MIB-driven). Mirrors /api/read's wrapper + credFromWeb, but also feeds the
+  // shared MIB store in so the engine can emit generic vendor sections. While the cache is still
+  // building, mibStore() is null: rather than fail, return an empty-but-valid model with an "indexing"
+  // hint so the UI can render the curated/standard view path and show progress.
+  app.post("/api/capabilities", wrap(async (b) => {
+    const store = mibStore();
+    if (!store) {
+      const data: CapabilityModel = { host: b.host, vendor: "", mibs: { loaded: 0, indexed: 0 }, sections: [] };
+      return { ok: true, data, indexing: true };
+    }
+    return { ok: true, data: await readDeviceCapabilities(b.host, credFromWeb(b.cred), store) };
+  }));
   app.get("/api/mib-status", (_req, res) => {
     const s = mibStore(); // null while a background build is in progress
     if (!s) return res.json({ ok: true, data: { ready: false, building: mibBuilding, loaded: 0, indexed: 0, dir: MIB_DIR } });
