@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("switchkeeper", {
   read: (req) => ipcRenderer.invoke("switch:read", req),
   plan: (req) => ipcRenderer.invoke("switch:plan", req),
+  // apply forwards the whole request, so a Phase 2 `acknowledge` field reaches the main process.
   apply: (req) => ipcRenderer.invoke("switch:apply", req),
   save: (req) => ipcRenderer.invoke("switch:save", req),
   topology: (req) => ipcRenderer.invoke("switch:topology", req),

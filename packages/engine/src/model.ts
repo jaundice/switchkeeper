@@ -162,6 +162,37 @@ export interface ChangeSet {
   results: OpResult[];
   status: ChangeSetStatus;
   snapshotId?: string;
+  /** Phase 2 SafetyEngine report (populated by the plan path). */
+  safety?: SafetyReport;
+}
+
+// ---- Phase 2 SafetyEngine: protected-path detection + edit classification ----
+// (Shapes pinned by docs/specs/phase2-contract.md. The engine derives these at plan time and
+//  the apply path gates on them; the surfaces/UI layer renders them.)
+
+/** Severity of an edit's effect on the management path. */
+export type SafetyClass = "safe" | "risky" | "blocked";
+
+/** Ports/VLANs the app must not strand. Derived per device at plan time. */
+export interface ProtectedSet {
+  ports: number[]; // bridge ports carrying (or likely carrying) management
+  vlans: number[]; // management VLAN id(s)
+  reason: string; // how it was derived (for display + audit)
+  confidence: "high" | "medium" | "low";
+}
+
+/** One classified edit: its severity and a human explanation. */
+export interface EditClassification {
+  edit: Edit;
+  cls: SafetyClass;
+  reason: string; // e.g. "disables the uplink (port 49)"
+}
+
+/** The full safety assessment for a planned change set. */
+export interface SafetyReport {
+  protectedSet: ProtectedSet;
+  classifications: EditClassification[];
+  worst: SafetyClass; // max severity across all edits ("safe" if none)
 }
 
 export interface Snapshot {

@@ -109,10 +109,24 @@ function buildServer(): McpServer {
     inputSchema: { host: z.string(), edits: z.array(z.record(z.any())), community: z.string().optional() },
   }, async ({ host, edits, community }) => ok(await planDevice(host, v2c(community), edits as Edit[])));
   server.registerTool("switch_apply", {
-    description: "Apply edits with read-back verify + rollback. Requires a write community. save=true persists after.",
-    inputSchema: { host: z.string(), edits: z.array(z.record(z.any())), writeCommunity: z.string(), community: z.string().optional(), save: z.boolean().optional() },
-  }, async ({ host, edits, writeCommunity, community, save }) =>
-    ok(await applyDevice(host, v2c(community, writeCommunity), edits as Edit[], { save: !!save })));
+    // Phase 2: risky/blocked edits are refused by the engine's safety gate unless explicitly
+    // acknowledged. Run switch_plan first to see each edit's classification (changeSet.safety),
+    // then pass acknowledge:{allowRisky,allowBlocked} to permit those classes. Plain safe edits
+    // need no acknowledgement.
+    description: "Apply edits with read-back verify + rollback. Requires a write community. save=true persists after. " +
+      "Risky/blocked edits (see switch_plan's changeSet.safety) require explicit acknowledgement: pass " +
+      "acknowledge:{allowRisky:true} to apply risky edits and acknowledge:{allowBlocked:true} to apply blocked " +
+      "(connectivity-severing) edits; without these the engine refuses them and sends no SETs.",
+    inputSchema: {
+      host: z.string(),
+      edits: z.array(z.record(z.any())),
+      writeCommunity: z.string(),
+      community: z.string().optional(),
+      save: z.boolean().optional(),
+      acknowledge: z.object({ allowRisky: z.boolean().optional(), allowBlocked: z.boolean().optional() }).optional(),
+    },
+  }, async ({ host, edits, writeCommunity, community, save, acknowledge }) =>
+    ok(await applyDevice(host, v2c(community, writeCommunity), edits as Edit[], { save: !!save, acknowledge })));
   server.registerTool("switch_save", {
     description: "Persist running config to startup (vendor-specific; may be unsupported on some models).",
     inputSchema: { host: z.string(), writeCommunity: z.string(), community: z.string().optional() },
@@ -177,8 +191,10 @@ if (httpIdx >= 0) {
   app.post("/api/read", wrap(async (b) => ({ ok: true, state: await readDevice(b.host, credFromWeb(b.cred)) })));
   app.post("/api/plan", wrap(async (b) => ({ ok: true, data: { mode: "plan", changeSet: await planDevice(b.host, credFromWeb(b.cred), b.edits || []) } })));
   app.post("/api/apply", wrap(async (b) => {
-    const r = await applyDevice(b.host, credFromWeb(b.cred), b.edits || [], { save: false });
-    return { ok: true, data: { mode: "apply", changeSet: r.changeSet, save: r.save } };
+    // Phase 2: forward the acknowledge gate to the engine (3rd-arg opts). Never auto-save here —
+    // save is the separate /api/save action, gated in the UI on a successful reachable apply.
+    const r = await applyDevice(b.host, credFromWeb(b.cred), b.edits || [], { save: false, acknowledge: b.acknowledge });
+    return { ok: true, data: { mode: "apply", changeSet: r.changeSet, save: r.save, reachableAfter: (r as { reachableAfter?: boolean }).reachableAfter } };
   }));
   app.post("/api/save", wrap(async (b) => {
     const r = await applyDevice(b.host, credFromWeb(b.cred), [], { save: true });

@@ -9,6 +9,74 @@ const pending = new Map(); // bridgePort -> { bridge, vid, orig }   (PVID edits)
 const memEdits = new Map(); // vid -> { tagged:Set, untagged:Set }  (membership edits)
 const pendingLag = new Map(); // bridgePort -> lagId|null            (LAG edits)
 
+// ====================================================================================
+// Phase 2: write-safety gating (consumes ChangeSet.safety from the plan path).
+// The flow is: edit -> "Review & apply" runs a dry-run plan -> we render each edit's
+// classification + the protected-set summary -> Apply is gated per the spec (simple vs
+// advanced mode, risky confirm checkbox, blocked typed confirm) -> after a reachable
+// apply, a SEPARATE "Save to startup" action appears. Nothing is ever auto-saved.
+// ====================================================================================
+
+// --- INTEGRATION FLAG ----------------------------------------------------------------
+// While the engine's SafetyEngine lands in parallel, set this true to inject MOCK_SAFETY
+// into the plan result so the full gating UI can be exercised without a live classifier.
+// SHIPPED DEFAULT IS false (use the engine's real changeSet.safety). Flip to true for UI dev.
+const SAFETY_USE_MOCK = false;
+// -------------------------------------------------------------------------------------
+
+// Mock SafetyReport: one safe, one risky, one blocked edit + a sample protected set.
+// Matches the contract shape (protectedSet / classifications[{edit,cls,reason}] / worst).
+const MOCK_SAFETY = {
+  protectedSet: {
+    ports: [5],
+    vlans: [1],
+    reason: "Source MAC found in FDB behind bridge port 5; mgmt VLAN = PVID of that port (1).",
+    confidence: "high",
+  },
+  classifications: [
+    { edit: { kind: "setPortLabel", ifIndex: 12, label: "AP-lobby" }, cls: "safe",
+      reason: "Renames an access port; does not touch the management path." },
+    { edit: { kind: "setLag", bridgePort: 5, lagId: 2 }, cls: "risky",
+      reason: "Adds the management access port (port 5) to a LAG; may briefly disrupt the switch." },
+    { edit: { kind: "setPortAdmin", ifIndex: 5, up: false }, cls: "blocked",
+      reason: "Admin-down of port 5 — the port the app reaches the switch through." },
+  ],
+  worst: "blocked",
+};
+
+// Captured between the plan (review) and apply steps:
+let lastPlanSafety = null; // SafetyReport from the most recent dry-run plan (or null)
+let lastApply = null;      // { reachableAfter } from the most recent successful apply (or null)
+let blockedConfirmText = ""; // what the user has typed into the blocked typed-confirm box
+
+// The token the user must type to release blocked edits: prefer an affected protected port
+// name (clearer for operators), else the literal "DISCONNECT".
+function blockedConfirmToken(safety) {
+  const ps = safety && safety.protectedSet;
+  const port = ps && Array.isArray(ps.ports) && ps.ports.length ? ps.ports[0] : null;
+  if (port != null) {
+    const p = (lastState?.ports || []).find((x) => x.bridgePort === port || x.ifIndex === port);
+    if (p && p.name) return String(p.name);
+  }
+  return "DISCONNECT";
+}
+
+// Short human label for an edit, for the classification list.
+function editLabel(e) {
+  if (!e || !e.kind) return "edit";
+  switch (e.kind) {
+    case "setPvid": return `Set PVID of port ${e.bridgePort} to VLAN ${e.vid}`;
+    case "setVlanMembership": return `Change VLAN ${e.vid} membership`;
+    case "setPortAdmin": return `${e.up ? "Enable" : "Disable"} port ${e.ifIndex}`;
+    case "setPortLabel": return `Label port ${e.ifIndex} "${e.label}"`;
+    case "setPoe": return `PoE ${e.on ? "on" : "off"} for port ${e.bridgePort}`;
+    case "setLag": return e.lagId == null ? `Remove port ${e.bridgePort} from LAG` : `Add port ${e.bridgePort} to LAG ${e.lagId}`;
+    case "createVlan": return `Create VLAN ${e.vid}${e.name ? ` (${e.name})` : ""}`;
+    case "deleteVlan": return `Delete VLAN ${e.vid}`;
+    default: return e.kind;
+  }
+}
+
 function setStatus(msg, cls) {
   const el = $("status");
   el.textContent = msg;
@@ -232,52 +300,268 @@ function renderAll() {
   });
 }
 
+// Collect the working edits into the engine Edit[] shape.
+function collectEdits() {
+  return [
+    ...[...pending.values()].map((p) => ({ kind: "setPvid", bridgePort: p.bridge, vid: p.vid })),
+    ...[...memEdits.entries()].map(([vid, e]) => ({ kind: "setVlanMembership", vid, tagged: [...e.tagged], untagged: [...e.untagged] })),
+    ...[...pendingLag.entries()].map(([bridge, lagId]) => ({ kind: "setLag", bridgePort: bridge, lagId })),
+  ];
+}
+
+function clearPendingState() {
+  pending.clear(); memEdits.clear(); pendingLag.clear();
+  lastPlanSafety = null; blockedConfirmText = "";
+}
+
+// The bottom bar. Without a safety review it shows pending count + "Review & apply"; once a plan
+// has been reviewed it expands to the classification list + gated Apply (and, after a reachable
+// apply, the separate Save-to-startup action).
 function renderPending(msg, cls) {
   const bar = $("pending");
   const total = pending.size + memEdits.size + pendingLag.size;
-  if (total === 0 && !msg) { bar.style.display = "none"; bar.innerHTML = ""; return; }
+  // The bar stays visible while there are edits, a review is open, or a save is offered.
+  if (total === 0 && !msg && !lastPlanSafety && !lastApply) { bar.style.display = "none"; bar.innerHTML = ""; return; }
   const parts = [
     ...[...pending.values()].map((p) => `g${p.bridge}->VLAN ${p.vid}`),
     ...[...memEdits.keys()].map((vid) => `VLAN ${vid} members`),
     ...[...pendingLag.entries()].map(([b, lag]) => `g${b}->${lag == null ? "no LAG" : "LAG " + lag}`),
   ];
   bar.style.display = "flex";
+  bar.style.flexWrap = "wrap";
+
+  // Post-apply save offer (separate, deliberate action; only after a successful apply).
+  if (lastApply && total === 0 && !lastPlanSafety) {
+    renderSaveOffer(bar, msg, cls);
+    return;
+  }
+
+  // Review open: show the safety panel + gated apply.
+  if (lastPlanSafety) {
+    renderReviewBar(bar, msg, cls);
+    return;
+  }
+
+  // Default: edits pending, no review yet.
   bar.innerHTML = `
     <span class="count">${total} pending</span>
     <span class="msg ${cls || ""}">${esc(msg || parts.join(", "))}</span>
     <span class="spacer"></span>
     <button id="discard" class="secondary">Discard</button>
-    <button id="apply">Apply changes</button>`;
-  $("apply").addEventListener("click", applyPending);
-  $("discard").addEventListener("click", () => { pending.clear(); memEdits.clear(); pendingLag.clear(); renderAll(); renderPending(); });
+    <button id="review">Review &amp; apply</button>`;
+  $("review").addEventListener("click", reviewPending);
+  $("discard").addEventListener("click", () => { clearPendingState(); renderAll(); renderPending(); });
 }
 
-async function applyPending() {
+// Render the protected-set one-liner, e.g. "Management path: port 5, VLAN 1 (confidence: high)".
+function protectedSummary(safety) {
+  const ps = (safety && safety.protectedSet) || {};
+  const ports = (ps.ports || []).map((p) => `port ${p}`);
+  const vlans = (ps.vlans || []).map((v) => `VLAN ${v}`);
+  const bits = [...ports, ...vlans];
+  const path = bits.length ? bits.join(", ") : "not determined";
+  const conf = ps.confidence ? ` <span class="conf">(confidence: ${esc(ps.confidence)})</span>` : "";
+  const reason = ps.reason ? `<div class="conf" title="${esc(ps.reason)}">${esc(ps.reason)}</div>` : "";
+  return `<div class="protset"><b>Management path:</b> ${esc(path)}${conf}${reason}</div>`;
+}
+
+// Render the per-edit classification list (colour + reason). Safe rows are deliberately calm.
+function classificationList(safety) {
+  const cls = (safety && safety.classifications) || [];
+  if (!cls.length) return '<p class="empty">No edits to classify.</p>';
+  const rows = cls.map((c) => {
+    const k = c.cls === "blocked" ? "blocked" : c.cls === "risky" ? "risky" : "safe";
+    return `<li class="clsrow ${k}">
+      <span class="tag">${esc(k)}</span>
+      <span class="desc">${esc(editLabel(c.edit))}</span>
+      <span class="why">— ${esc(c.reason || "")}</span>
+    </li>`;
+  }).join("");
+  return `<ul class="clslist">${rows}</ul>`;
+}
+
+// Decide whether Apply may proceed, given the mode and the user's confirmations.
+// Returns { enabled, hint, acknowledge }.
+function gateDecision(safety) {
+  const worst = (safety && safety.worst) || "safe";
+  const hasRisky = worst === "risky" || worst === "blocked";
+  const hasBlocked = worst === "blocked";
+
+  if (!advancedMode) {
+    // Simple mode: only fully-safe change-sets may apply.
+    if (worst === "safe") return { enabled: true, hint: "", acknowledge: undefined };
+    return { enabled: false, hint: "Enable Advanced mode to apply risky changes", acknowledge: undefined };
+  }
+
+  // Advanced mode: risky needs the confirm checkbox; blocked needs the typed token (and checkbox).
+  const riskyOk = !hasRisky || $("ackRisky")?.checked;
+  const token = blockedConfirmToken(safety);
+  const blockedOk = !hasBlocked || (blockedConfirmText.trim() === token);
+  const enabled = riskyOk && blockedOk;
+  let hint = "";
+  if (!riskyOk) hint = "Tick the box to confirm you understand the risk";
+  else if (!blockedOk) hint = `Type "${token}" to confirm the blocked change`;
+  // Plain-safe sets send no acknowledge at all; otherwise set only the flags the situation needs
+  // (and only because the gate above already required the matching confirmation to be enabled).
+  let acknowledge;
+  if (hasRisky || hasBlocked) {
+    acknowledge = {};
+    if (hasRisky) acknowledge.allowRisky = true;
+    if (hasBlocked) acknowledge.allowBlocked = true;
+  }
+  return { enabled, hint, acknowledge };
+}
+
+function renderReviewBar(bar, msg, cls) {
+  const safety = lastPlanSafety;
+  const worst = (safety && safety.worst) || "safe";
+  const hasRisky = worst === "risky" || worst === "blocked";
+  const hasBlocked = worst === "blocked";
+  const token = blockedConfirmToken(safety);
+  const decision = gateDecision(safety);
+
+  // Gate controls only when Advanced mode is on (simple mode never offers a risky/blocked apply).
+  let gateHtml = "";
+  if (advancedMode && hasRisky) {
+    gateHtml += `<div class="gate"><label>
+      <input type="checkbox" id="ackRisky" ${$("ackRisky")?.checked ? "checked" : ""}>
+      I understand this may disrupt the switch</label></div>`;
+  }
+  if (advancedMode && hasBlocked) {
+    gateHtml += `<div class="gate blocked">
+      <span class="glabel">This severs the management path. Type <b>${esc(token)}</b> to confirm:</span>
+      <input type="text" id="ackBlocked" autocomplete="off" placeholder="${esc(token)}" value="${esc(blockedConfirmText)}">
+    </div>`;
+  }
+  const hint = decision.hint || msg || "";
+
+  // Reuse the Phase-1 Advanced-mode toggle here too, so the operator can flip it without leaving
+  // the review (it shares the same `advancedMode` state as the Details panel).
+  const advClass = advancedMode ? "advtoggle on" : "advtoggle";
+
+  bar.innerHTML =
+    `<div class="safety" style="width:100%">
+       ${protectedSummary(safety)}
+       ${classificationList(safety)}
+       ${gateHtml}
+     </div>
+     <label class="${advClass}" title="Advanced mode is required to apply risky or blocked changes">
+       <input type="checkbox" id="advChkBar" ${advancedMode ? "checked" : ""}> Advanced mode
+     </label>
+     <span class="msg ${cls || ""}">${esc(hint)}</span>
+     <span class="spacer"></span>
+     <button id="back" class="secondary">Back</button>
+     <button id="apply" class="${hasBlocked ? "danger" : ""}" ${decision.enabled ? "" : "disabled"}>Apply</button>`;
+
+  const adv = $("advChkBar");
+  if (adv) adv.addEventListener("change", () => {
+    advancedMode = adv.checked;
+    blockedConfirmText = ""; // re-arm the typed confirm when the mode flips
+    if (lastCaps) renderCapabilities(lastCaps); // keep the Details panel toggle in sync
+    renderPending();
+  });
+  const r = $("ackRisky");
+  if (r) r.addEventListener("change", () => renderPending());
+  const b = $("ackBlocked");
+  if (b) b.addEventListener("input", () => { blockedConfirmText = b.value; updateApplyEnabled(); });
+  $("back").addEventListener("click", () => { lastPlanSafety = null; blockedConfirmText = ""; renderPending(); });
+  $("apply").addEventListener("click", () => applyEdits(decision.acknowledge));
+}
+
+// Cheap re-evaluation of the Apply button without re-rendering (keeps text-box focus/caret).
+function updateApplyEnabled() {
+  const btn = $("apply");
+  if (!btn || !lastPlanSafety) return;
+  const decision = gateDecision(lastPlanSafety);
+  btn.disabled = !decision.enabled;
+}
+
+// Step 1: dry-run plan to obtain the SafetyReport, then open the review panel.
+async function reviewPending() {
   if (pending.size === 0 && memEdits.size === 0 && pendingLag.size === 0) return;
   const host = $("host").value.trim();
   const cred = getCred();
   if (cred.version === "v2c" && !cred.writeCommunity) { renderPending("enter a write community to apply", "bad"); return; }
   if (cred.version === "v3" && !cred.v3.user) { renderPending("enter a v3 user to apply", "bad"); return; }
-  const edits = [
-    ...[...pending.values()].map((p) => ({ kind: "setPvid", bridgePort: p.bridge, vid: p.vid })),
-    ...[...memEdits.entries()].map(([vid, e]) => ({ kind: "setVlanMembership", vid, tagged: [...e.tagged], untagged: [...e.untagged] })),
-    ...[...pendingLag.entries()].map(([bridge, lagId]) => ({ kind: "setLag", bridgePort: bridge, lagId })),
-  ];
+  const edits = collectEdits();
+  renderPending("checking safety...", "");
+  const res = await window.switchkeeper.plan({ host, cred, edits });
+  if (!res.ok) { renderPending("plan error: " + res.error, "bad"); return; }
+  const cs = (res.data && res.data.changeSet) || {};
+  // Live: use the engine's safety report. Mock: inject the fixture so the gating UI is exercisable
+  // before the SafetyEngine lands (flip SAFETY_USE_MOCK at the top of this file).
+  lastPlanSafety = SAFETY_USE_MOCK ? MOCK_SAFETY : (cs.safety || null);
+  if (!lastPlanSafety) {
+    // No classifier present and not mocking: treat as unknown -> require Advanced (fail safe).
+    lastPlanSafety = { protectedSet: { ports: [], vlans: [], reason: "no safety report from engine", confidence: "low" },
+      classifications: edits.map((e) => ({ edit: e, cls: "risky", reason: "unclassified (engine returned no safety report)" })),
+      worst: edits.length ? "risky" : "safe" };
+  }
+  blockedConfirmText = "";
+  renderPending();
+}
+
+// Step 2: apply with the right acknowledge flags. acknowledge is undefined for plain-safe sets.
+async function applyEdits(acknowledge) {
+  const host = $("host").value.trim();
+  const cred = getCred();
+  const edits = collectEdits();
+  if (!edits.length) return;
   $("apply").disabled = true;
   renderPending("applying " + edits.length + " change(s)...");
-  const res = await window.switchkeeper.apply({ host, cred, edits });
-  if (!res.ok) { renderPending("apply error: " + res.error, "bad"); return; }
-  const cs = res.data.changeSet || {};
+  const res = await window.switchkeeper.apply({ host, cred, edits, acknowledge });
+  if (!res.ok) { lastPlanSafety && renderReviewBar($("pending"), "apply error: " + res.error, "bad"); return; }
+  const data = res.data || {};
+  const cs = data.changeSet || {};
   if (cs.status === "verified") {
-    pending.clear();
-    setStatus("applied " + edits.length + " change(s)");
-    await connect();
+    const n = edits.length;
+    // Apply succeeded. Record reachability so the (separate) Save-to-startup action can gate on it.
+    lastApply = { reachableAfter: data.reachableAfter === true };
+    clearPendingState();
+    setStatus("applied " + n + " change(s)");
+    await connect();           // re-read (rebuilds the grid + pending bar)
+    renderPending();           // re-show the save offer (connect() called renderPending with no edits)
   } else {
     const firstErr = (cs.results || []).find((r) => !r.ok);
     let why = firstErr ? (firstErr.error || "verify failed") : cs.status;
     if (/time/i.test(why)) why = "write timed out - writes must come from the management host (.2), not this PC";
     renderPending("apply " + cs.status + ": " + why, "bad");
   }
+}
+
+// Separate, deliberate "Save to startup" offer shown only after a successful apply.
+// The button is disabled unless the apply reported reachableAfter === true (per the contract).
+function renderSaveOffer(bar, msg, cls) {
+  const reachable = lastApply && lastApply.reachableAfter === true;
+  const note = reachable
+    ? "Changes are in running config only. Save them to startup to keep them permanently."
+    : "Switch not confirmed reachable after the change — saving is disabled so a reboot recovers.";
+  bar.innerHTML =
+    `<span class="count ok">applied</span>
+     <span class="msg savehint ${cls || ""}">${esc(msg || note)}</span>
+     <span class="spacer"></span>
+     <button id="dismissSave" class="secondary">Dismiss</button>
+     <button id="saveStartup" class="savestartup" ${reachable ? "" : "disabled"}
+       title="${reachable ? "Persist running config to startup" : "Disabled until the switch is confirmed reachable"}">Save to startup</button>`;
+  $("dismissSave").addEventListener("click", () => { lastApply = null; renderPending(); });
+  const sb = $("saveStartup");
+  if (sb) sb.addEventListener("click", saveToStartup);
+}
+
+// Persist running config to startup — gated on a successful, reachable apply + a confirm.
+async function saveToStartup() {
+  if (!lastApply || lastApply.reachableAfter !== true) return;
+  if (!window.confirm("Keep changes permanently? This saves the running config to startup.")) return;
+  const cred = getCred();
+  $("saveStartup").disabled = true;
+  renderPending("saving to startup...");
+  const res = await window.switchkeeper.save({ host: $("host").value.trim(), cred });
+  if (!res.ok) { renderSaveOffer($("pending"), "save error: " + res.error, "bad"); return; }
+  const s = res.data && res.data.save;
+  lastApply = null;
+  if (s && s.ok) { renderPending(); setStatus("config saved to startup"); }
+  else if (s && s.supported === false) { renderPending(); setStatus("SNMP save not available here - use 'open UI' then Maintenance > Save Configuration"); }
+  else { renderPending(); setStatus("save: " + (s ? s.message : "no result"), "error"); }
 }
 
 function getCred() {
@@ -613,7 +897,12 @@ function renderCapabilities(model) {
     (sections.length ? sectionHtml : `<p class="empty" style="margin-top:14px">No capability sections${mibs.loaded ? "" : " (no MIBs loaded — import the device's MIBs to see vendor objects)"}.</p>`);
 
   const chk = $("advChk");
-  if (chk) chk.addEventListener("change", () => { advancedMode = chk.checked; renderCapabilities(lastCaps); });
+  if (chk) chk.addEventListener("change", () => {
+    advancedMode = chk.checked;
+    renderCapabilities(lastCaps);
+    // Keep the safety review's gating in sync if a review/apply bar is open (shared toggle).
+    if (lastPlanSafety || lastApply) renderPending();
+  });
 }
 
 async function loadCapabilities() {

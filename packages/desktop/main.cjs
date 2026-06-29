@@ -24,8 +24,10 @@ ipcMain.handle("switch:read", async (_e, { host, cred }) => {
 ipcMain.handle("switch:plan", async (_e, { host, cred, edits }) => {
   try { return { ok: true, data: { mode: "plan", changeSet: await engine.planDevice(host, credFromWeb(cred), edits || []) } }; } catch (e) { return fail(e); }
 });
-ipcMain.handle("switch:apply", async (_e, { host, cred, edits }) => {
-  try { const r = await engine.applyDevice(host, credFromWeb(cred), edits || [], { save: false }); return { ok: true, data: { mode: "apply", changeSet: r.changeSet, save: r.save } }; } catch (e) { return fail(e); }
+ipcMain.handle("switch:apply", async (_e, { host, cred, edits, acknowledge }) => {
+  // Phase 2: forward the acknowledge gate ({allowRisky,allowBlocked}) to the engine; never auto-save
+  // here (save is the separate switch:save action, gated on reachableAfter in the UI).
+  try { const r = await engine.applyDevice(host, credFromWeb(cred), edits || [], { save: false, acknowledge }); return { ok: true, data: { mode: "apply", changeSet: r.changeSet, save: r.save, reachableAfter: r.reachableAfter } }; } catch (e) { return fail(e); }
 });
 ipcMain.handle("switch:save", async (_e, { host, cred }) => {
   try { const r = await engine.applyDevice(host, credFromWeb(cred), [], { save: true }); return { ok: true, data: { mode: "apply", changeSet: r.changeSet, save: r.save } }; } catch (e) { return fail(e); }

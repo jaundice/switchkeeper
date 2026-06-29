@@ -18,6 +18,8 @@
   window.switchkeeper = {
     read: (req) => post("/api/read", req),
     plan: (req) => post("/api/plan", req),
+    // apply forwards the whole request body, so a Phase 2 `acknowledge` field
+    // ({allowRisky,allowBlocked}) — when the renderer includes it — reaches the engine gate.
     apply: (req) => post("/api/apply", req),
     save: (req) => post("/api/save", req),
     topology: (req) => post("/api/topology", req),
