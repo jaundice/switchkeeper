@@ -6,6 +6,40 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-29
+
+MIB-driven device model and adaptive UI — read and (safely) manage whatever a switch's own
+MIBs expose, on top of the standard core, across both the web/MCP server and the desktop app.
+
+### Added
+
+- **Adaptive capability model** (`readDeviceCapabilities`): curated sections (System/Ports/VLANs/
+  PoE/LLDP) plus generic sections built from the device's loaded vendor MIBs, so each switch shows
+  exactly the objects its MIBs describe — no hand-coded per-vendor OIDs. Exposed at
+  `POST /api/capabilities`, `switch:capabilities` (IPC), and the `switch_capabilities` MCP tool.
+- **Object resolver** (`createObjectResolver`): resolves a symbol to its OID/type/access via
+  device MIBs → standard `oids.ts` → vendor profile, falling back cleanly when no MIBs are loaded.
+- **SafetyEngine** (`detectProtectedSet` + `classifyEdits`): detects the management path (FDB-pinned
+  via the local source MAC when L2-adjacent, else uplink heuristic) and classifies every edit
+  safe/risky/blocked. Writes never auto-persist to startup; `applyDevice` re-checks reachability and
+  refuses risky/blocked edits without explicit acknowledgement.
+- **Generic writes with type-aware editors** (`describeObject` + `setObject`): parses an object's MIB
+  SYNTAX (enums, ranges, SIZE, TEXTUAL-CONVENTIONs, MAX-ACCESS, DESCRIPTION) to drive the right editor
+  widget; `POST /api/object-meta` + `switch_set_object`. Generic writes are never classified safe and
+  are blocked in IP/SNMP/credential subtrees.
+- **Columnar / table objects** (`enumerateModule` + `buildRowDecoder`): surfaces table columns that
+  net-snmp's providers omit; per-cell editing is gated by mapping a row's index back to a port/VLAN so
+  a cell write to the management row is blocked. Tables load lazily — `readDeviceCapabilities` lists
+  table stubs and `readTable` / `POST /api/table` / `switch_table` fetch a table's rows on demand.
+- **Type-aware editor UI + Advanced mode**: an off-by-default, visually-flagged Advanced mode gates
+  risky/generic writes; per-object and per-cell editors with dry-run plan → safety review → apply.
+
+### Changed
+
+- MIB loading is robust to parser-poisoning vendor MIBs, runs the cold parse in a background process,
+  caches the distilled symbol→OID map (and module→file map) to disk, and uses true topological load
+  order — a large vendor set goes from a multi-minute, server-blocking parse to instant warm loads.
+
 ## [0.3.0] - 2026-06-29
 
 ### Added
