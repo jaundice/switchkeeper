@@ -63,6 +63,7 @@ import { readState } from "./readState.ts";
 import { planChanges, applyChangeSet } from "./apply.ts";
 import { saveRunningConfig } from "./save.ts";
 import { readFdb, readLldpNeighbors } from "./topology.ts";
+import { localSourceMac } from "./interfaces.ts";
 import { detectProtectedSet, classifyEdits, gateDecision, type Acknowledge } from "./safety.ts";
 import { OID } from "./oids.ts";
 import { asString } from "./util.ts";
@@ -99,7 +100,10 @@ export async function planDevice(
     // Topology reads are best-effort: a switch with no LLDP/FDB must still plan. On error we fall
     // back to empty topology, which forces detectProtectedSet down its conservative path.
     const topo = await readTopologySafe(client);
-    const protectedSet = detectProtectedSet(state, topo, opts);
+    // Auto-pin the mgmt port via our own source MAC when L2-adjacent (high confidence); the caller
+    // can still override with an explicit opts.sourceMac.
+    const detOpts = { ...opts, sourceMac: opts.sourceMac ?? localSourceMac(host) };
+    const protectedSet = detectProtectedSet(state, topo, detOpts);
     cs.safety = classifyEdits(edits, state, protectedSet);
     return cs;
   } finally {
@@ -132,7 +136,8 @@ export async function applyDevice(
 
     // 1. Classify + gate BEFORE any write.
     const topo = await readTopologySafe(client);
-    const protectedSet = detectProtectedSet(state, topo, opts);
+    const detOpts = { ...opts, sourceMac: opts.sourceMac ?? localSourceMac(host) };
+    const protectedSet = detectProtectedSet(state, topo, detOpts);
     const safety = classifyEdits(edits, state, protectedSet);
     const cs = planChanges(state, edits);
     cs.safety = safety;

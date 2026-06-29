@@ -197,8 +197,13 @@ const GET_BATCH = 24;
  * (their content is already surfaced in curated sections); only the device's own vendor MIBs
  * feed the generic view, which is the whole point of "coverage bounded by the device's MIBs".
  */
-export function selectGenericCandidates(mib: MibStore): ResolvedObject[] {
+export function selectGenericCandidates(mib: MibStore, enterprise?: number): ResolvedObject[] {
   const standardModules = new Set(STANDARD_MODULES);
+  // The generic catch-all is for VENDOR objects only: restrict to the enterprises subtree
+  // (1.3.6.1.4.1.*) so standard MIBs that get pulled in as imports (SNMP-TARGET-MIB under
+  // snmpModules, DIFFSERV-MIB under mib-2, etc.) don't leak in. When the device's enterprise is
+  // known, narrow further to its own subtree so we don't sweep other vendors' objects.
+  const wantPrefix = enterprise ? `1.3.6.1.4.1.${enterprise}.` : "1.3.6.1.4.1.";
   const out: ResolvedObject[] = [];
 
   for (const moduleName of mib.loadedModules()) {
@@ -209,6 +214,7 @@ export function selectGenericCandidates(mib: MibStore): ResolvedObject[] {
     const sorted = [...objects].sort((a, b) => compareOid(a.oid, b.oid));
     for (let i = 0; i < sorted.length; i++) {
       const obj = sorted[i];
+      if (!obj.oid.startsWith(wantPrefix)) continue; // not a vendor object -> not generic
       const access = accessFromMaxAccess(obj.maxAccess);
       if (access !== "read-only" && access !== "read-write") continue; // skip not-accessible
       const next = sorted[i + 1];
@@ -281,7 +287,7 @@ export async function readDeviceCapabilities(
     // Generic sweep: GET each candidate scalar instance in bounded batches, keeping only the
     // ones that came back with a usable value. Per-batch failures are swallowed so one bad PDU
     // doesn't sink the whole capability read.
-    const candidates = selectGenericCandidates(mib);
+    const candidates = selectGenericCandidates(mib, device.vendorEnterprise);
     const values = await sweepScalars(client, candidates);
     const generic = buildGenericSections(candidates, values);
 
