@@ -248,8 +248,12 @@ const STANDARD_MODULES = [
 // ---- Phase 4: generic TABLE candidate selection + pure section builder ----
 
 // How many table COLUMNS we are willing to walk in total (across all vendor tables). Each column is
-// one bounded subtree walk; cap the total so a capability read stays fast on a big vendor MIB set.
-const MAX_TABLE_COLUMNS = 200;
+// one subtree walk (many GETNEXTs); on a big switch hundreds of walks block the event loop and can
+// trip SNMP timeouts, so we cap the count AND enforce a wall-clock budget (TABLE_SWEEP_BUDGET_MS).
+const MAX_TABLE_COLUMNS = 80;
+// Hard wall-clock budget for the whole table sweep. When exceeded we stop walking and return what
+// we have — capability reads must stay responsive even on a device with many/large vendor tables.
+const TABLE_SWEEP_BUDGET_MS = 15000;
 
 /** One vendor table to walk: its entry symbol + its columns (resolved OID + access + base). */
 export interface GenericTableCandidate {
@@ -404,17 +408,24 @@ export async function readDeviceCapabilities(
     const generic = buildGenericSections(candidates, values);
 
     // Phase 4: generic TABLE sections. Enumerate vendor table columns (which providers omit), walk
-    // each column (bounded, read-only), assemble rows keyed by the shared instance suffix, attach
-    // columnMeta/rowKeys + a human index note. Only tables that returned rows are emitted.
-    const tableCands = selectGenericTables(mib, device.vendorEnterprise);
-    const columnValues = await sweepTableColumns(client, tableCands);
-    const indexNote = (entry: string): string | undefined => {
-      const cand = tableCands.find((c) => c.entry === entry);
-      if (!cand) return undefined;
-      const names = rowIndexNames(mib, cand.module, entry);
-      return names.length ? names.join(", ") : "raw";
-    };
-    const genericTables = buildGenericTableSections(tableCands, columnValues, indexNote);
+    // each column (bounded by count AND a wall-clock budget, read-only), assemble rows keyed by the
+    // shared instance suffix, attach columnMeta/rowKeys + a human index note. Only tables that
+    // returned rows are emitted. The whole block is guarded: tables are a best-effort enrichment, so
+    // any failure (or a slow device) degrades to "no tables" rather than sinking the capability read.
+    let genericTables: CapabilitySection[] = [];
+    try {
+      const tableCands = selectGenericTables(mib, device.vendorEnterprise);
+      const columnValues = await sweepTableColumns(client, tableCands, Date.now() + TABLE_SWEEP_BUDGET_MS);
+      const indexNote = (entry: string): string | undefined => {
+        const cand = tableCands.find((c) => c.entry === entry);
+        if (!cand) return undefined;
+        const names = rowIndexNames(mib, cand.module, entry);
+        return names.length ? names.join(", ") : "raw";
+      };
+      genericTables = buildGenericTableSections(tableCands, columnValues, indexNote);
+    } catch {
+      genericTables = [];
+    }
 
     const vendor = profileForEnterprise(device.vendorEnterprise).name || "Unknown";
 
@@ -461,10 +472,13 @@ async function sweepScalars(
 async function sweepTableColumns(
   client: SnmpClient,
   candidates: GenericTableCandidate[],
+  deadline: number,
 ): Promise<Map<string, Map<string, string | number | null>>> {
   const out = new Map<string, Map<string, string | number | null>>();
   for (const cand of candidates) {
+    if (Date.now() > deadline) break; // out of budget -> return what we have so far
     for (const col of cand.columns) {
+      if (Date.now() > deadline) break;
       try {
         const cells = await client.column(col.oid);
         const m = new Map<string, string | number | null>();
