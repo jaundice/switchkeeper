@@ -6,6 +6,27 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-29
+
+### Added
+
+- **Server-side MIB management**: upload vendor MIBs to the running server (`POST /api/mib-import`),
+  query load state (`GET /api/mib-status`, now reporting `{ready, building}`), with uploads
+  persisted in `MIB_DIR`. MIBs are indexed by their module header, so files without `.mib`/`.my`
+  extensions load fine.
+- **Bundled standard MIBs**: 16 redistributable IETF/IEEE MIBs ship as the resolution base so a
+  single-file vendor upload resolves its standard imports; bundled into the desktop build too.
+
+### Changed
+
+- **Robust MIB loading**: a directory load now quarantines the MIBs that poison net-snmp's
+  ModuleStore parser (which previously let one bad file zero out the entire set) and loads the
+  maximum healthy set instead. Poison discovery walks the modules in true topological order
+  (dependencies first) to avoid false-positive cascades, the parse runs in a separate process so
+  the server never blocks, and the distilled symbol→OID map is cached to disk (keyed on a file
+  signature) so restarts load in ~seconds with no re-parsing. The quarantine list is written
+  incrementally so an interrupted build resumes.
+
 ### Fixed
 
 - **Apply verify/rollback**: `createVlan`/`deleteVlan` are now verified against the Q-BRIDGE

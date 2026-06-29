@@ -28,3 +28,6 @@ Thumbs.db
 # electron-builder / packaging artifacts (later)
 release/
 *.app
+
+usermibs.tgz
+
