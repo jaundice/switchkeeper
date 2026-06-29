@@ -278,6 +278,10 @@ export function selectGenericTables(mib: MibStore, enterprise?: number): Generic
   for (const moduleName of mib.loadedModules()) {
     if (standardModules.has(moduleName)) continue;
     if (budget <= 0) break;
+    // Cheap pre-filter (providers come from the cache, no parse): only the device-vendor's own
+    // modules have objects under wantPrefix, so skip parsing the dozens of other-vendor/standard
+    // modules. This keeps the request-path enumeration to ~the vendor's modules, not all of them.
+    if (!mib.providers(moduleName).some((p) => p.oid.startsWith(wantPrefix))) continue;
     const objs = enumerateModule(mib, moduleName);
     if (!objs.length) continue;
     // Group columns by their owning entry (row) symbol.

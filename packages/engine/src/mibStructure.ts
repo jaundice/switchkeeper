@@ -52,7 +52,22 @@ interface RawObject {
  * resolved numeric OIDs and a kind. Empty if the module text isn't available (e.g. a net-snmp base
  * module with no indexed file).
  */
+// Parsing a module's source (regex every OBJECT-TYPE + resolve the OID chain) is CPU-heavy and a
+// loaded store is immutable, so memoize per store+module. Without this, a capability read that
+// enumerates many vendor modules re-parses them on every request and blocks the event loop.
+const enumCache = new WeakMap<MibStore, Map<string, ModuleObject[]>>();
+
 export function enumerateModule(mib: MibStore, module: string): ModuleObject[] {
+  let perStore = enumCache.get(mib);
+  if (!perStore) { perStore = new Map(); enumCache.set(mib, perStore); }
+  const hit = perStore.get(module);
+  if (hit) return hit;
+  const result = enumerateModuleUncached(mib, module);
+  perStore.set(module, result);
+  return result;
+}
+
+function enumerateModuleUncached(mib: MibStore, module: string): ModuleObject[] {
   const text = mib.moduleText(module);
   if (!text) return [];
 
