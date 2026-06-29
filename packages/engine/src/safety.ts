@@ -213,14 +213,23 @@ function detectMgmtVlan(
 // classifyEdits — PURE classifier (no I/O), implements the contract table exactly
 // ---------------------------------------------------------------------------
 
+/** Optional inputs to the classifier. Phase 4 adds `decodeRow`: maps a table cell's instance OID to
+ *  the port/VLAN its row represents, so a generic write to a per-row column can be checked against
+ *  the protected management path the same way curated edits are. Pure: the decoder is a closure the
+ *  caller builds from the (read-only) MIB store + state (see buildRowDecoder in mibStructure.ts). */
+export interface ClassifyOptions {
+  decodeRow?: (instanceOid: string) => { port?: number; vlan?: number } | null;
+}
+
 export function classifyEdits(
   edits: Edit[],
   state: DeviceState,
   protectedSet: ProtectedSet,
+  opts: ClassifyOptions = {},
 ): SafetyReport {
   const P = new Set(protectedSet.ports);
   const V = new Set(protectedSet.vlans);
-  const classifications = edits.map((edit) => classifyOne(edit, state, P, V));
+  const classifications = edits.map((edit) => classifyOne(edit, state, P, V, opts));
   return { protectedSet, classifications, worst: worstOf(classifications) };
 }
 
@@ -229,6 +238,7 @@ function classifyOne(
   state: DeviceState,
   P: Set<number>,
   V: Set<number>,
+  opts: ClassifyOptions,
 ): EditClassification {
   switch (edit.kind) {
     case "setPortAdmin": {
@@ -323,11 +333,38 @@ function classifyOne(
 
     case "setObject": {
       // A generic write to an arbitrary vendor object is NEVER "safe" (contract): we can't reason
-      // about its effect the way we can for the curated edits above. Blocked if it targets a known
-      // dangerous subtree (IP/SNMP/credential/admin), otherwise risky — which forces an explicit
-      // acknowledgement through the same Phase 2 gate as any other risky edit.
-      const danger = isUnderDangerousSubtree(edit.oid);
+      // about its effect the way we can for the curated edits above.
       const what = edit.name ? `${edit.name} (${edit.oid})` : edit.oid;
+
+      // Phase 4: a setObject can target a TABLE CELL (a per-row column instance). If a row decoder
+      // is supplied, map the cell's row back to a port/VLAN and protect the management path just
+      // like the curated per-port/per-VLAN edits — this is the SAFETY-CRITICAL bit: a write whose
+      // row is a protected port/VLAN must be blocked. Decode FIRST so a protected row beats even a
+      // benign-looking OID, then fall through to the Phase 3 dangerous-subtree / risky logic.
+      const decoded = opts.decodeRow ? opts.decodeRow(edit.oid) : null;
+      if (decoded) {
+        if (decoded.port !== undefined && P.has(decoded.port)) {
+          return cls(edit, "blocked", `writes ${what} on the management port ${decoded.port}`);
+        }
+        if (decoded.vlan !== undefined && V.has(decoded.vlan)) {
+          return cls(edit, "blocked", `writes ${what} on the management VLAN ${decoded.vlan}`);
+        }
+        // Decodable but a dangerous subtree still wins (e.g. an ifAdminStatus column on a non-mgmt
+        // port is still a link-dropping write).
+        const dangerD = isUnderDangerousSubtree(edit.oid);
+        if (dangerD.blocked) {
+          return cls(edit, "blocked", `writes ${what} in a protected subtree: ${dangerD.why}`);
+        }
+        // Decodable and not protected: a per-row write whose effect we can't curate -> risky.
+        const where =
+          decoded.port !== undefined ? `port ${decoded.port}` :
+          decoded.vlan !== undefined ? `VLAN ${decoded.vlan}` : "an unprotected row";
+        return cls(edit, "risky", `generic cell write to ${what} on ${where} — not a management target`);
+      }
+
+      // No decoder, or the row is undecodable. Blocked if it targets a known dangerous subtree
+      // (IP/SNMP/credential/admin), otherwise risky — undecodable is NEVER safe (default-to-safe).
+      const danger = isUnderDangerousSubtree(edit.oid);
       if (danger.blocked) {
         return cls(edit, "blocked", `writes ${what} in a protected subtree: ${danger.why}`);
       }

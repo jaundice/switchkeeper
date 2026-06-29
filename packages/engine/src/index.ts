@@ -24,6 +24,9 @@ export {
 } from "./apply.ts";
 // Phase 3 generic-write spike: parse an object's SYNTAX for the type-aware editor + SET path.
 export { describeObject } from "./mibSyntax.ts";
+// Phase 4 columnar support: enumerate ALL module objects (incl. table columns) + a row decoder that
+// maps a cell's instance OID back to the port/VLAN its row represents (drives the safety gate).
+export { enumerateModule, buildRowDecoder, type ModuleObject } from "./mibStructure.ts";
 // Note: MibBaseType, MibEnumValue, MibSyntax are exported via `export * from "./model.ts"`.
 export { saveRunningConfig, type SaveResult } from "./save.ts";
 export { discover, discoverMany, type DiscoverOptions } from "./discover.ts";
@@ -41,6 +44,7 @@ export {
   isUnderDangerousSubtree,
   type DetectOptions,
   type Acknowledge,
+  type ClassifyOptions,
 } from "./safety.ts";
 // Note: SafetyClass, ProtectedSet, EditClassification, SafetyReport are exported via
 // `export * from "./model.ts"` above.
@@ -60,6 +64,10 @@ export {
   buildGenericSections,
   selectGenericCandidates,
   scalarInstanceOid,
+  // Phase 4: generic table selection + pure section builder.
+  selectGenericTables,
+  buildGenericTableSections,
+  type GenericTableCandidate,
   type Topology,
 } from "./deviceCapabilities.ts";
 
@@ -71,6 +79,8 @@ import { saveRunningConfig } from "./save.ts";
 import { readFdb, readLldpNeighbors } from "./topology.ts";
 import { localSourceMac } from "./interfaces.ts";
 import { detectProtectedSet, classifyEdits, gateDecision, type Acknowledge } from "./safety.ts";
+import { buildRowDecoder } from "./mibStructure.ts";
+import { createMibStore } from "./mib.ts";
 import { OID } from "./oids.ts";
 import { asString } from "./util.ts";
 import type { MibStore } from "./mib.ts";
@@ -113,7 +123,13 @@ export async function planDevice(
     // can still override with an explicit opts.sourceMac.
     const detOpts = { ...opts, sourceMac: opts.sourceMac ?? localSourceMac(host) };
     const protectedSet = detectProtectedSet(state, topo, detOpts);
-    cs.safety = classifyEdits(edits, state, protectedSet);
+    // Phase 4: build the table-cell row decoder so a setObject targeting a per-row column is gated
+    // against the protected port/VLAN. Default to a fresh MIB-less store — the decoder still handles
+    // standard ifIndex/dot1q tables from baked-in knowledge; surfaces passes the server's shared
+    // store so vendor tables decode too. Read-only.
+    const mib = opts.mib ?? createMibStore();
+    const decodeRow = buildRowDecoder(mib, state);
+    cs.safety = classifyEdits(edits, state, protectedSet, { decodeRow });
     return cs;
   } finally {
     client.close();
@@ -147,7 +163,12 @@ export async function applyDevice(
     const topo = await readTopologySafe(client);
     const detOpts = { ...opts, sourceMac: opts.sourceMac ?? localSourceMac(host) };
     const protectedSet = detectProtectedSet(state, topo, detOpts);
-    const safety = classifyEdits(edits, state, protectedSet);
+    // Phase 4: same row decoder as planDevice so the apply gate refuses a cell write that targets a
+    // protected port/VLAN. Default to a MIB-less store (handles standard ifIndex/dot1q); surfaces
+    // threads its shared store via opts.mib for vendor-table coverage. Read-only.
+    const mib = opts.mib ?? createMibStore();
+    const decodeRow = buildRowDecoder(mib, state);
+    const safety = classifyEdits(edits, state, protectedSet, { decodeRow });
     const cs = planChanges(state, edits);
     cs.safety = safety;
 

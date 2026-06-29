@@ -285,10 +285,28 @@ export interface CapabilityValue {
   type?: string;
 }
 
+// ---- Phase 4: columnar / table objects (read + guarded cell edit) ----
+// Shapes pinned by docs/specs/phase4-contract.md. Back-compatible: existing curated tables keep
+// working with just columns/rows; generic editable tables additionally carry columnMeta/rowKeys/
+// index so the UI can build per-cell editors and the SafetyEngine can map a cell's row back to a
+// port/VLAN. A cell (column c, row r) is editable iff columnMeta[c].access === "read-write"; its
+// instance OID is columnMeta[c].oid + "." + rowKeys[r].
+
+/** Per-column metadata aligned to CapabilityTable.columns[] (generic editable tables only). */
+export interface CapabilityColumnMeta {
+  name: string;         // column symbol, e.g. "extremePortLoadShareGroupId"
+  oid: string;          // the COLUMN base OID (no instance)
+  access: ObjectAccess; // read-write columns are editable
+  base: MibBaseType;    // editor widget category (full enums/range fetched via object-meta)
+}
+
 /** A displayed table (rows of cells), columns describing each cell. */
 export interface CapabilityTable {
-  columns: string[];
-  rows: (string | number | null)[][];
+  columns: string[];                    // header labels (existing)
+  rows: (string | number | null)[][];   // existing
+  columnMeta?: CapabilityColumnMeta[];  // aligned to columns[]; present on generic editable tables
+  rowKeys?: string[];                   // instance suffix per row, aligned to rows[] (e.g. "49" or "1.20")
+  index?: string;                       // human note on the index, e.g. "ifIndex" / "dot1qVlan" / "raw"
 }
 
 /**

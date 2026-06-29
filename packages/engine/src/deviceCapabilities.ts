@@ -17,8 +17,10 @@ import { readState } from "./readState.ts";
 import { readFdb, readLldpNeighbors } from "./topology.ts";
 import { profileForEnterprise } from "./profiles.ts";
 import { accessFromMaxAccess, typeFromScalarType } from "./objectResolver.ts";
+import { enumerateModule, rowIndexNames, type ModuleObject } from "./mibStructure.ts";
 import type { MibStore } from "./mib.ts";
 import type {
+  CapabilityColumnMeta,
   CapabilityModel,
   CapabilitySection,
   CapabilityValue,
@@ -243,6 +245,116 @@ const STANDARD_MODULES = [
   "ENTITY-MIB", "HOST-RESOURCES-MIB", "RMON-MIB", "TCP-MIB", "UDP-MIB",
 ];
 
+// ---- Phase 4: generic TABLE candidate selection + pure section builder ----
+
+// How many table COLUMNS we are willing to walk in total (across all vendor tables). Each column is
+// one bounded subtree walk; cap the total so a capability read stays fast on a big vendor MIB set.
+const MAX_TABLE_COLUMNS = 200;
+
+/** One vendor table to walk: its entry symbol + its columns (resolved OID + access + base). */
+export interface GenericTableCandidate {
+  module: string;
+  entry: string;       // the table ENTRY (row) symbol, e.g. "extremePortConfigEntry"
+  title: string;       // section title (the entry symbol)
+  columns: ModuleObject[]; // accessible columns of this table (kind === "column")
+}
+
+/**
+ * From the loaded vendor MIBs, pick the TABLE entries under the device enterprise and enumerate
+ * their accessible columns. Mirrors selectGenericCandidates' scoping (vendor enterprise subtree,
+ * standard modules excluded) but for tables: enumerateModule surfaces the columns that net-snmp's
+ * providers omit. Bounded by MAX_TABLE_COLUMNS columns total. Pure (no SNMP).
+ */
+export function selectGenericTables(mib: MibStore, enterprise?: number): GenericTableCandidate[] {
+  const standardModules = new Set(STANDARD_MODULES);
+  const wantPrefix = enterprise ? `1.3.6.1.4.1.${enterprise}.` : "1.3.6.1.4.1.";
+  const out: GenericTableCandidate[] = [];
+  let budget = MAX_TABLE_COLUMNS;
+
+  for (const moduleName of mib.loadedModules()) {
+    if (standardModules.has(moduleName)) continue;
+    if (budget <= 0) break;
+    const objs = enumerateModule(mib, moduleName);
+    if (!objs.length) continue;
+    // Group columns by their owning entry (row) symbol.
+    const colsByEntry = new Map<string, ModuleObject[]>();
+    for (const o of objs) {
+      if (o.kind !== "column" || !o.table) continue;
+      if (!o.oid.startsWith(wantPrefix)) continue; // vendor-subtree only
+      if (o.access !== "read-only" && o.access !== "read-write") continue; // accessible columns only
+      if (!colsByEntry.has(o.table)) colsByEntry.set(o.table, []);
+      colsByEntry.get(o.table)!.push(o);
+    }
+    for (const [entry, columns] of colsByEntry) {
+      if (!columns.length) continue;
+      // Stable column order by OID so the table reads left-to-right by column sub-id.
+      columns.sort((a, b) => compareOid(a.oid, b.oid));
+      const take = columns.slice(0, Math.max(0, budget));
+      if (!take.length) break;
+      budget -= take.length;
+      out.push({ module: moduleName, entry, title: entry, columns: take });
+      if (budget <= 0) break;
+    }
+  }
+  return out;
+}
+
+/**
+ * Build the generic TABLE sections (pure; the live walk feeds it). For each table candidate,
+ * `columnValues` maps a column's base OID to (rowKey -> cell value) gathered from the column walk.
+ * Rows are keyed by the shared instance suffix (rowKey) seen across the table's columns; a row is
+ * emitted for every rowKey any column returned. Only tables that returned at least one row produce
+ * a section. columnMeta/rowKeys/index are attached so the UI can build per-cell editors and the
+ * SafetyEngine can decode each cell. Sorted by module then entry for stable output.
+ */
+export function buildGenericTableSections(
+  candidates: GenericTableCandidate[],
+  columnValues: Map<string, Map<string, string | number | null>>,
+  indexNote?: (entry: string) => string | undefined,
+): CapabilitySection[] {
+  const sections: CapabilitySection[] = [];
+  for (const cand of candidates) {
+    // Collect the union of row keys across this table's columns.
+    const rowKeySet = new Set<string>();
+    for (const col of cand.columns) {
+      const m = columnValues.get(col.oid);
+      if (m) for (const k of m.keys()) rowKeySet.add(k);
+    }
+    if (!rowKeySet.size) continue; // table returned nothing -> don't emit it
+
+    const rowKeys = [...rowKeySet].sort(compareOid);
+    const columnMeta: CapabilityColumnMeta[] = cand.columns.map((c) => ({
+      name: c.name,
+      oid: c.oid,
+      access: c.access,
+      base: c.base,
+    }));
+    const columns = cand.columns.map((c) => c.name);
+    const rows = rowKeys.map((rk) =>
+      cand.columns.map((c) => {
+        const m = columnValues.get(c.oid);
+        const v = m?.get(rk);
+        return v === undefined ? null : v;
+      }),
+    );
+
+    sections.push({
+      id: cand.entry,
+      title: cand.title,
+      kind: "generic",
+      table: {
+        columns,
+        rows,
+        columnMeta,
+        rowKeys,
+        index: indexNote ? indexNote(cand.entry) : undefined,
+      },
+    });
+  }
+  // Stable order: by section title (entry symbol).
+  return sections.sort((a, b) => a.title.localeCompare(b.title));
+}
+
 /** Numeric, dot-separated OID comparison (so "1.3.6.1.4.1.9.10" sorts after "1.3.6.1.4.1.9.2"). */
 function compareOid(a: string, b: string): number {
   const pa = a.split(".").map(Number);
@@ -291,13 +403,27 @@ export async function readDeviceCapabilities(
     const values = await sweepScalars(client, candidates);
     const generic = buildGenericSections(candidates, values);
 
+    // Phase 4: generic TABLE sections. Enumerate vendor table columns (which providers omit), walk
+    // each column (bounded, read-only), assemble rows keyed by the shared instance suffix, attach
+    // columnMeta/rowKeys + a human index note. Only tables that returned rows are emitted.
+    const tableCands = selectGenericTables(mib, device.vendorEnterprise);
+    const columnValues = await sweepTableColumns(client, tableCands);
+    const indexNote = (entry: string): string | undefined => {
+      const cand = tableCands.find((c) => c.entry === entry);
+      if (!cand) return undefined;
+      const names = rowIndexNames(mib, cand.module, entry);
+      return names.length ? names.join(", ") : "raw";
+    };
+    const genericTables = buildGenericTableSections(tableCands, columnValues, indexNote);
+
     const vendor = profileForEnterprise(device.vendorEnterprise).name || "Unknown";
 
     return {
       host,
       vendor,
       mibs: { loaded: mib.loadedModules().length, indexed: mib.indexedModules().length },
-      sections: [...curated, ...generic], // curated first, then generic, per the contract
+      // curated first, then generic scalars, then generic tables, per the contract ordering.
+      sections: [...curated, ...generic, ...genericTables],
     };
   } finally {
     client.close();
@@ -322,6 +448,34 @@ async function sweepScalars(
       }
     } catch {
       // transport error on this batch; skip it and keep going.
+    }
+  }
+  return out;
+}
+
+/**
+ * Walk each candidate table column (read-only) and return columnOid -> (rowKey -> value). rowKey is
+ * the instance suffix after the column base (what SnmpClient.column already keys by). Per-column
+ * walk failures are swallowed so one bad column doesn't sink the whole table.
+ */
+async function sweepTableColumns(
+  client: SnmpClient,
+  candidates: GenericTableCandidate[],
+): Promise<Map<string, Map<string, string | number | null>>> {
+  const out = new Map<string, Map<string, string | number | null>>();
+  for (const cand of candidates) {
+    for (const col of cand.columns) {
+      try {
+        const cells = await client.column(col.oid);
+        const m = new Map<string, string | number | null>();
+        for (const [rowKey, vb] of cells) {
+          const v = normalizeValue(vb.type, vb.value);
+          if (v !== undefined) m.set(rowKey, v);
+        }
+        if (m.size) out.set(col.oid, m);
+      } catch {
+        // transport/walk error on this column; skip it and keep going.
+      }
     }
   }
   return out;

@@ -851,6 +851,33 @@ const MOCK_CAPABILITIES = {
       },
     },
     {
+      // Phase 4 fixture: a generic editable TABLE — read-write "Port priority" column carries
+      // columnMeta/rowKeys, so each cell in it gets an "Edit" affordance (Advanced mode only).
+      // The other columns are read-only (or lack meta) and stay display-only. rowKeys are the ifIndex
+      // instance suffixes; the engine's row decoder maps these back to ports for safety gating.
+      id: "EXTREME-PORT-MIB",
+      title: "Vendor objects · per-port settings",
+      kind: "generic",
+      table: {
+        columns: ["ifIndex", "Name", "Load-share group", "Port priority"],
+        rows: [
+          [1, "g1", 0, 128],
+          [2, "g2", 0, 128],
+          [5, "g5 (mgmt)", 0, 128],
+          [49, "g49 (uplink)", 1, 64],
+        ],
+        index: "ifIndex",
+        rowKeys: ["1", "2", "5", "49"],
+        columnMeta: [
+          { name: "ifIndex", oid: "1.3.6.1.2.1.2.2.1.1", access: "read-only", base: "integer" },
+          { name: "ifName", oid: "1.3.6.1.2.1.31.1.1.1.1", access: "read-only", base: "string" },
+          { name: "extremePortLoadShareGroupId", oid: "1.3.6.1.4.1.1916.1.2.4.1.1.1", access: "read-only", base: "integer" },
+          // The one editable column. Mock object-meta for this symbol is in MOCK_SYNTAX below.
+          { name: "extremePortPriority", oid: "1.3.6.1.4.1.1916.1.2.4.1.1.5", access: "read-write", base: "integer" },
+        ],
+      },
+    },
+    {
       id: "NETGEAR-ENVIRONMENT-MIB",
       title: "Vendor objects · NETGEAR-ENVIRONMENT-MIB",
       kind: "generic",
@@ -883,15 +910,49 @@ function capScalarTable(scalars, editable, sectionId) {
   return `<table class="kv-table"><tbody>${rows}</tbody></table>`;
 }
 
-function capDataTable(table) {
-  const head = (table.columns || []).map((c) => `<th>${esc(c)}</th>`).join("");
-  const body = (table.rows || []).map((row) =>
-    "<tr>" + (row || []).map((cell) =>
-      (cell === null || cell === undefined || cell === "")
-        ? '<td class="empty">-</td>'
-        : (typeof cell === "number" ? `<td class="num">${esc(cell)}</td>` : `<td>${esc(cell)}</td>`)
-    ).join("") + "</tr>"
-  ).join("");
+// Render a generic TABLE section (columns × rows). When `editable` (generic section + Advanced mode)
+// and the table carries `columnMeta`/`rowKeys`, every cell in a read-write column gets an inline
+// "Edit" affordance; clicking it opens an EXPANDING SUBROW beneath the row (see openCellEditor) that
+// reuses the Phase 3 editor + Phase 2 gating. Read-only columns and tables without columnMeta stay
+// display-only. sectionId namespaces the subrow ids so multiple table sections coexist.
+//
+// Why an expanding subrow (not a modal overlay): dense per-port tables stay readable when the editor
+// appears in-context right beneath the clicked row, the existing Phase 3 scalar editor already uses
+// this exact inline pattern (so we share its editor-body builder verbatim — no duplication), and it
+// sidesteps backdrop/focus-trap concerns. Horizontal scroll (.scrollwrap) keeps wide tables usable.
+function capDataTable(table, editable, sectionId) {
+  const cols = table.columns || [];
+  const meta = (editable && Array.isArray(table.columnMeta)) ? table.columnMeta : null;
+  const keys = (editable && Array.isArray(table.rowKeys)) ? table.rowKeys : null;
+  const head = cols.map((c) => `<th>${esc(c)}</th>`).join("");
+
+  const body = (table.rows || []).map((row, r) => {
+    const rid = `${sectionId || "tbl"}_${r}`;
+    const cells = (row || []).map((cell, c) => {
+      const disp = (cell === null || cell === undefined || cell === "")
+        ? '<span class="empty">-</span>'
+        : esc(cell);
+      const numCls = typeof cell === "number" ? " num" : "";
+      // A cell is editable iff its column is read-write AND we have the instance key for the row.
+      const cm = meta && meta[c];
+      const canEdit = cm && cm.access === "read-write" && keys && keys[r] != null;
+      if (canEdit) {
+        // Stash everything openCellEditor needs to stage the setObject on the Edit button.
+        return `<td class="${numCls.trim()} celledit">` +
+          `<span class="cellval">${disp}</span>` +
+          `<button class="editbtn cellbtn" data-rid="${esc(rid)}" data-name="${esc(cm.name || "")}"` +
+          ` data-oid="${esc(cm.oid || "")}" data-key="${esc(keys[r])}" data-base="${esc(cm.base || "")}"` +
+          ` data-cur="${esc(cell == null ? "" : cell)}">Edit</button></td>`;
+      }
+      return `<td class="${numCls.trim()}">${disp}</td>`;
+    }).join("");
+    // A dedicated full-width subrow beneath each row holds the inline cell editor when opened.
+    const ed = (meta && keys)
+      ? `<tr id="celled_${esc(rid)}" class="celledrow" style="display:none"><td colspan="${cols.length}"></td></tr>`
+      : "";
+    return `<tr>${cells}</tr>${ed}`;
+  }).join("");
+
   return `<div class="scrollwrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
 }
 
@@ -910,7 +971,7 @@ function renderCapabilities(model) {
     const editable = s.kind === "generic" && advancedMode;
     let inner = "";
     if (s.scalars && s.scalars.length) inner += capScalarTable(s.scalars, editable, "s" + si);
-    if (s.table) inner += capDataTable(s.table);
+    if (s.table) inner += capDataTable(s.table, editable, "t" + si);
     if (!inner) inner = '<p class="empty">no values reported</p>';
     return `<div class="capsection"><h2>${esc(s.title)}${gtag}</h2>${inner}</div>`;
   }).join("");
@@ -941,9 +1002,13 @@ function renderCapabilities(model) {
     if (lastPlanSafety || lastApply) renderPending();
   });
 
-  // Phase 3: wire each generic-object "Edit" button to open its type-aware editor.
-  panel.querySelectorAll("button.editbtn").forEach((btn) => {
+  // Phase 3: wire each generic SCALAR "Edit" button to open its type-aware editor.
+  panel.querySelectorAll("button.editbtn:not(.cellbtn)").forEach((btn) => {
     btn.addEventListener("click", () => openObjectEditor(btn.dataset.name, btn.dataset.oid, btn.dataset.rid, btn));
+  });
+  // Phase 4: wire each TABLE-CELL "Edit" button to open its inline cell editor (subrow).
+  panel.querySelectorAll("button.cellbtn").forEach((btn) => {
+    btn.addEventListener("click", () => openCellEditor(btn, btn.dataset));
   });
 }
 
@@ -982,10 +1047,18 @@ const MOCK_SYNTAX = {
     sizeRange: { min: 0, max: 32 },
     description: "Free-text administrative contact for this device.",
   },
+  // Phase 4 fixture: the editable TABLE COLUMN's syntax (object-meta keys on the column symbol).
+  extremePortPriority: {
+    base: "integer", snmpType: 2, access: "read-write",
+    range: { min: 0, max: 255 },
+    description: "Per-port transmit priority (0–255). Set per row (ifIndex).",
+  },
 };
 
 // The object currently being edited inline: { name, oid (instance), syntax, rid }. Only one editor
-// is open at a time (a fresh openObjectEditor closes any previous one).
+// is open at a time (a fresh openObjectEditor / openCellEditor closes any previous one). Phase 4
+// cell editors live in `celled_<rid>` subrows; Phase 3 scalar editors in `objed_<rid>` rows — both
+// share `openEditor`, the editor-body builder, the value read, and the stage->review handoff below.
 let openEditor = null;
 
 // The scalar's single instance OID. The capability model shows base scalar OIDs (no instance), so
@@ -1066,27 +1139,34 @@ async function openObjectEditor(name, oid, rid, btn) {
   // per-scalar access, so without meta we treat it as read-only to fail safe.
   if (!syntax) {
     row.style.display = "";
-    row.querySelector("td").innerHTML =
-      `<div class="objeditor"><div class="ename">${esc(name || instanceOid)} <span class="mono">${esc(instanceOid)}</span></div>` +
-      `<div class="ero">No MIB SYNTAX available (import this object's MIB to edit it). Read-only.</div>` +
-      `<div class="erow" style="margin-top:8px"><span class="spacer"></span><button class="editbtn" id="objClose">Close</button></div></div>`;
+    row.querySelector("td").innerHTML = editorReadonlyHtml(name || instanceOid, instanceOid,
+      "No MIB SYNTAX available (import this object's MIB to edit it). Read-only.");
     $("objClose").addEventListener("click", closeObjectEditor);
     openEditor = { rid };
     return;
   }
   if (syntax.access && syntax.access !== "read-write") {
     row.style.display = "";
-    row.querySelector("td").innerHTML =
-      `<div class="objeditor"><div class="ename">${esc(name || instanceOid)} <span class="mono">${esc(instanceOid)}</span></div>` +
-      `<div class="ero">This object is ${esc(syntax.access)} — display only.</div>` +
-      (syntax.description ? `<div class="ehelp">${esc(syntax.description)}</div>` : "") +
-      `<div class="erow" style="margin-top:8px"><span class="spacer"></span><button class="editbtn" id="objClose">Close</button></div></div>`;
+    row.querySelector("td").innerHTML = editorReadonlyHtml(name || instanceOid, instanceOid,
+      `This object is ${syntax.access} — display only.`, syntax);
     $("objClose").addEventListener("click", closeObjectEditor);
     openEditor = { rid };
     return;
   }
 
   const w = editorWidget(syntax, cur);
+  row.style.display = "";
+  row.querySelector("td").innerHTML = editorBodyHtml(name || instanceOid, instanceOid, syntax, cur, w);
+  openEditor = { rid, name, oid: instanceOid, syntax, kind: w.kind };
+  $("objCancel").addEventListener("click", closeObjectEditor);
+  $("objReview").addEventListener("click", reviewObjectEdit);
+}
+
+// Shared editor-body HTML for BOTH the Phase 3 scalar editor and the Phase 4 cell editor: the object
+// name + instance OID, the type-aware widget, units/range/TC/description helper lines, and the
+// Cancel/Review buttons (ids objCancel/objReview, wired by the caller). `currentValue` is shown as
+// the cell's/scalar's current value so the operator sees what they are changing from.
+function editorBodyHtml(displayName, instanceOid, syntax, currentValue, w) {
   const units = syntax.units ? ` <b>${esc(syntax.units)}</b>` : "";
   const help = [];
   if (syntax.units) help.push(`Units:${units}`);
@@ -1095,22 +1175,26 @@ async function openObjectEditor(name, oid, rid, btn) {
   if (syntax.tc) help.push(`TC: ${esc(syntax.tc)}`);
   const helpLine = help.length ? `<div class="ehelp">${help.join(" · ")}</div>` : "";
   const descLine = syntax.description ? `<div class="ehelp">${esc(syntax.description)}</div>` : "";
-
-  row.style.display = "";
-  row.querySelector("td").innerHTML =
-    `<div class="objeditor">
+  const curLine = (currentValue !== undefined && currentValue !== "")
+    ? `<div class="ehelp">Current: <b>${esc(currentValue)}</b></div>` : "";
+  return `<div class="objeditor">
        <div class="erow">
-         <span class="ename">${esc(name || instanceOid)} <span class="mono">${esc(instanceOid)}</span></span>
+         <span class="ename">${esc(displayName)} <span class="mono">${esc(instanceOid)}</span></span>
          ${w.html}
          <span class="spacer"></span>
          <button class="editbtn" id="objCancel">Cancel</button>
          <button id="objReview">Review</button>
        </div>
-       ${descLine}${helpLine}
+       ${curLine}${descLine}${helpLine}
      </div>`;
-  openEditor = { rid, name, oid: instanceOid, syntax, kind: w.kind };
-  $("objCancel").addEventListener("click", closeObjectEditor);
-  $("objReview").addEventListener("click", reviewObjectEdit);
+}
+
+// Shared "read-only / no-syntax" editor-body HTML (object can't be edited): name + a note + Close.
+function editorReadonlyHtml(displayName, instanceOid, note, syntax) {
+  const desc = (syntax && syntax.description) ? `<div class="ehelp">${esc(syntax.description)}</div>` : "";
+  return `<div class="objeditor"><div class="ename">${esc(displayName)} <span class="mono">${esc(instanceOid)}</span></div>` +
+    `<div class="ero">${esc(note)}</div>${desc}` +
+    `<div class="erow" style="margin-top:8px"><span class="spacer"></span><button class="editbtn" id="objClose">Close</button></div></div>`;
 }
 
 // The displayed value of a scalar from the model, used to prefill the editor.
@@ -1125,10 +1209,13 @@ function currentScalarValue(name, oid) {
   return "";
 }
 
+// Close whichever inline editor is open. Phase 3 scalar editors live in `objed_<rid>`; Phase 4 cell
+// editors in `celled_<rid>`. openEditor.rowId holds the exact DOM id so one close path serves both.
 function closeObjectEditor() {
-  if (openEditor && openEditor.rid) {
-    const row = $("objed_" + openEditor.rid);
-    if (row) { row.style.display = "none"; row.querySelector("td").innerHTML = ""; }
+  if (openEditor) {
+    const id = openEditor.rowId || (openEditor.rid ? "objed_" + openEditor.rid : null);
+    const row = id ? $(id) : null;
+    if (row) { row.style.display = "none"; const td = row.querySelector("td"); if (td) td.innerHTML = ""; }
   }
   openEditor = null;
 }
@@ -1140,6 +1227,9 @@ function reviewObjectEdit() {
   if (!openEditor || !openEditor.oid) return;
   const value = readEditorValue(openEditor.kind);
   if (value === undefined || value === "") { setStatus("enter a value to set", "error"); return; }
+  // Single staging shape for BOTH scalar and cell writes: { kind:"setObject", oid, value, snmpType?,
+  // name? }. collectEdits() folds pendingSetObject into the engine Edit[] that plan/apply consume,
+  // so cell writes reuse the exact Phase 2 gating + Phase 3 apply path — no duplicate classify logic.
   pendingSetObject = {
     oid: openEditor.oid,
     value,
@@ -1149,6 +1239,70 @@ function reviewObjectEdit() {
   closeObjectEditor();
   renderPending();   // show the pending bar with the staged object write
   reviewPending();   // run the dry-run plan -> safety classification -> gating UI
+}
+
+// ====================================================================================
+// Phase 4: inline TABLE-CELL editor (expanding subrow). Mirrors the Phase 3 scalar editor but the
+// instance OID is built from the COLUMN base OID + the row's instance suffix:
+//   oid  = columnMeta[c].oid + "." + rowKeys[r]   (the cell's fully-qualified instance OID)
+//   name = columnMeta[c].name + "." + rowKeys[r]  (symbol.instance, for display/audit)
+// It fetches object-meta by the column symbol, renders the SAME type-aware widget, and on "Review"
+// stages that setObject and runs the EXISTING plan -> Phase 2 gating -> apply (reviewObjectEdit).
+// The engine's row decoder maps the row back to a port/VLAN, so a cell targeting the management
+// row classifies blocked; otherwise risky. Nothing auto-applies. Reuses editorBodyHtml/readEditorValue.
+// ====================================================================================
+async function openCellEditor(btn, ds) {
+  const rid = ds.rid;
+  const row = $("celled_" + rid);
+  if (!row) return;
+  // Toggle: clicking Edit again on the open cell closes it.
+  if (openEditor && openEditor.rowId === "celled_" + rid && row.style.display !== "none") {
+    closeObjectEditor();
+    return;
+  }
+  closeObjectEditor(); // close any other open editor first (only one at a time)
+
+  const colName = ds.name || "";
+  const colOid = ds.oid || "";
+  const key = ds.key;
+  const cur = ds.cur != null ? ds.cur : "";
+  // Build the cell's instance identity per the Phase 4 contract.
+  const instanceOid = colOid && key != null ? `${colOid}.${key}` : colOid;
+  const instanceName = colName ? `${colName}.${key}` : instanceOid;
+
+  if (btn) { btn.disabled = true; btn.textContent = "…"; }
+  // Resolve units/range/enums/description from the COLUMN symbol (object-meta keys on the symbol).
+  const syntax = await fetchSyntax(colName, colOid);
+  if (btn) { btn.disabled = false; btn.textContent = "Edit"; }
+
+  const td = row.querySelector("td");
+  // No SYNTAX → can't safely build an editor. Fall back to display-only (fail safe). Still show the
+  // column's base hint so an operator knows what's needed (import the column's MIB).
+  if (!syntax) {
+    row.style.display = "";
+    td.innerHTML = editorReadonlyHtml(instanceName, instanceOid,
+      "No MIB SYNTAX available for this column (import its MIB to edit it). Read-only.");
+    $("objClose").addEventListener("click", closeObjectEditor);
+    openEditor = { rowId: "celled_" + rid };
+    return;
+  }
+  // Defensive: the cell should already be in a read-write column, but honour object-meta's access too.
+  if (syntax.access && syntax.access !== "read-write") {
+    row.style.display = "";
+    td.innerHTML = editorReadonlyHtml(instanceName, instanceOid,
+      `This column is ${syntax.access} — display only.`, syntax);
+    $("objClose").addEventListener("click", closeObjectEditor);
+    openEditor = { rowId: "celled_" + rid };
+    return;
+  }
+
+  const w = editorWidget(syntax, cur);
+  row.style.display = "";
+  td.innerHTML = editorBodyHtml(instanceName, instanceOid, syntax, cur, w);
+  // openEditor carries the instance oid/name so reviewObjectEdit stages the right setObject.
+  openEditor = { rowId: "celled_" + rid, name: instanceName, oid: instanceOid, syntax, kind: w.kind };
+  $("objCancel").addEventListener("click", closeObjectEditor);
+  $("objReview").addEventListener("click", reviewObjectEdit);
 }
 
 async function loadCapabilities() {

@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import {
   buildCuratedSections,
   buildGenericSections,
+  buildGenericTableSections,
   scalarInstanceOid,
+  type GenericTableCandidate,
 } from "../src/deviceCapabilities.ts";
 import type { DeviceState, ResolvedObject } from "../src/model.ts";
 
@@ -117,6 +119,59 @@ test("buildGenericSections: no surviving objects -> no sections", () => {
     { name: "x", oid: "1.3.6.1.4.1.1.1", module: "M", source: "device-mib", access: "read-only" },
   ];
   assert.deepEqual(buildGenericSections(objects, new Map()), []);
+});
+
+// ---------------------------------------------------------------------------
+// Phase 4: buildGenericTableSections — rows keyed by shared suffix, columnMeta/rowKeys/index attached
+// ---------------------------------------------------------------------------
+
+function tableCand(): GenericTableCandidate {
+  return {
+    module: "ACME-MIB",
+    entry: "acmePortCfgEntry",
+    title: "acmePortCfgEntry",
+    columns: [
+      { name: "acmePortCfgSpeed", oid: "1.3.6.1.4.1.99.1.1.1", access: "read-write", base: "enum", kind: "column", table: "acmePortCfgEntry" },
+      { name: "acmePortCfgName", oid: "1.3.6.1.4.1.99.1.1.2", access: "read-write", base: "string", kind: "column", table: "acmePortCfgEntry" },
+    ],
+  };
+}
+
+test("buildGenericTableSections: assembles rows by shared row key + attaches columnMeta/rowKeys/index", () => {
+  const cand = tableCand();
+  const columnValues = new Map<string, Map<string, string | number | null>>([
+    ["1.3.6.1.4.1.99.1.1.1", new Map<string, string | number | null>([["1", 3], ["49", 2]])],
+    ["1.3.6.1.4.1.99.1.1.2", new Map<string, string | number | null>([["1", "g1"], ["49", "uplink"]])],
+  ]);
+  const sections = buildGenericTableSections([cand], columnValues, () => "ifIndex");
+  assert.equal(sections.length, 1);
+  const s = sections[0];
+  assert.equal(s.kind, "generic");
+  assert.equal(s.id, "acmePortCfgEntry");
+  assert.deepEqual(s.table!.columns, ["acmePortCfgSpeed", "acmePortCfgName"]);
+  assert.deepEqual(s.table!.rowKeys, ["1", "49"]); // sorted numerically by OID compare
+  assert.deepEqual(s.table!.rows, [[3, "g1"], [2, "uplink"]]);
+  assert.equal(s.table!.index, "ifIndex");
+  // columnMeta aligned to columns, carrying the editable column OID + access + base.
+  assert.equal(s.table!.columnMeta!.length, 2);
+  assert.equal(s.table!.columnMeta![0].oid, "1.3.6.1.4.1.99.1.1.1");
+  assert.equal(s.table!.columnMeta![0].access, "read-write");
+  assert.equal(s.table!.columnMeta![0].base, "enum");
+});
+
+test("buildGenericTableSections: a row key present in only one column still emits a (sparse) row", () => {
+  const cand = tableCand();
+  const columnValues = new Map<string, Map<string, string | number | null>>([
+    ["1.3.6.1.4.1.99.1.1.1", new Map<string, string | number | null>([["7", 1]])],
+    // name column has nothing for row 7
+  ]);
+  const sections = buildGenericTableSections([cand], columnValues);
+  assert.equal(sections[0].table!.rows.length, 1);
+  assert.deepEqual(sections[0].table!.rows[0], [1, null]); // missing cell -> null
+});
+
+test("buildGenericTableSections: a table that returned no rows is dropped", () => {
+  assert.deepEqual(buildGenericTableSections([tableCand()], new Map()), []);
 });
 
 test("scalarInstanceOid: appends .0 idempotently", () => {

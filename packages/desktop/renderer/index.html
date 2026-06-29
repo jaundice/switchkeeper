@@ -179,6 +179,16 @@
       .objeditor .ehelp b { color: var(--text); font-weight: 600; }
       .objeditor .ero { color: var(--amber); font-size: 12px; margin-top: 5px; }
       .objeditor .spacer { flex: 1; }
+      /* --- Phase 4: editable TABLE cells + inline cell editor (expanding subrow, Advanced only) --- */
+      /* Editable cell: value sits beside a compact Edit button revealed on row hover (kept readable
+         in dense tables). The button stays clickable even when not hovered (focus/touch). */
+      td.celledit { white-space: nowrap; }
+      td.celledit .cellval { margin-right: 6px; }
+      td.celledit button.cellbtn { opacity: .45; padding: 0 7px; }
+      tr:hover td.celledit button.cellbtn, td.celledit button.cellbtn:focus { opacity: 1; }
+      /* The cell editor lives in a full-width subrow; drop the cell padding so .objeditor controls it. */
+      tr.celledrow > td { padding: 0; background: transparent; }
+      tr.celledrow .objeditor { margin: 6px 0; }
     </style>
   </head>
   <body>
