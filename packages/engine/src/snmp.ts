@@ -20,6 +20,9 @@ export class SnmpClient {
   private readonly opts: Required<SnmpOptions>;
   private readSession: any;
   private writeSession: any;
+  // Latched true if this agent answers a GETBULK with no varbinds while GETNEXT returns rows
+  // (broken GETBULK, e.g. some Extreme Switch Engine agents). Once set, column() skips bulk.
+  private bulkBroken = false;
 
   constructor(host: string, cred: Credential, opts: SnmpOptions = {}) {
     this.host = host;
@@ -139,15 +142,29 @@ export class SnmpClient {
    * -> value. `opts.bulk` (default true) uses the GETBULK walk for far fewer round-trips, falling
    * back to the GETNEXT walk() if the device errors on bulk (some old/locked agents reject GETBULK
    * or cap the PDU). Read-only; per-row keying is identical regardless of which walk produced it.
+   *
+   * Some agents (observed: Extreme Switch Engine / EXOS) accept a GETBULK but answer with no
+   * varbinds instead of an error, which would silently yield an empty table. So an empty bulk result
+   * is re-checked with a GETNEXT walk: if GETNEXT finds rows, the agent's GETBULK is broken and we
+   * latch bulk OFF for the rest of this session (`bulkBroken`) so later columns skip straight to
+   * GETNEXT. A genuinely empty column (GETNEXT also empty) costs only one extra cheap GETNEXT.
    */
   async column(columnOid: string, opts: { bulk?: boolean } = {}): Promise<Map<string, VarBind>> {
-    const useBulk = opts.bulk ?? true;
+    const useBulk = (opts.bulk ?? true) && !this.bulkBroken;
     let vbs: VarBind[];
     if (useBulk) {
       try {
         vbs = await this.walkBulk(columnOid);
+        if (vbs.length === 0) {
+          // No rows via GETBULK -> verify with GETNEXT. If that finds rows, this agent mishandles
+          // GETBULK; use the GETNEXT result and disable bulk for the session.
+          const alt = await this.walk(columnOid);
+          if (alt.length > 0) this.bulkBroken = true;
+          vbs = alt;
+        }
       } catch {
         // Device rejected/failed GETBULK -> fall back to the serial GETNEXT walk. Same result shape.
+        this.bulkBroken = true;
         vbs = await this.walk(columnOid);
       }
     } else {

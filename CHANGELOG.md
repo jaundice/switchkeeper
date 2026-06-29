@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-06-29
+
+### Fixed
+
+- **Empty tables on GETBULK-broken agents**: some agents (observed on an Extreme Switch Engine /
+  EXOS 5520) answer a GETBULK with zero varbinds instead of an error, which made every table read
+  (ports, VLANs, PoE, LAGs, topology) come back empty even though GETNEXT works fine. `column()` now
+  re-checks an empty bulk result with a GETNEXT walk and, if that finds rows, uses it and latches
+  GETBULK off for the rest of the session so later columns skip straight to the working path. A
+  genuinely empty column costs only one extra cheap GETNEXT.
+
 ## [0.4.2] - 2026-06-29
 
 Stability hotfix plus browser-side credential convenience.

@@ -1,6 +1,6 @@
 {
   "name": "@switchkeeper/mcp",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "private": true,
   "description": "Switchkeeper MCP server - manage smart switches over SNMP via MCP tools",
   "homepage": "https://github.com/jaundice/switchkeeper#readme",
