@@ -49,7 +49,7 @@ export {
 // Note: SafetyClass, ProtectedSet, EditClassification, SafetyReport are exported via
 // `export * from "./model.ts"` above.
 export { saveConfigVarbinds } from "./save.ts";
-export { type SaveMethod } from "./profiles.ts";
+export { type SaveMethod, type CommitConfirm } from "./profiles.ts";
 // MIB-driven model (Phase 1): resolver + adaptive capability model. Types come via model.ts.
 export {
   createObjectResolver,
@@ -87,9 +87,22 @@ import { buildRowDecoder } from "./mibStructure.ts";
 import { createMibStore } from "./mib.ts";
 import { OID } from "./oids.ts";
 import { asString } from "./util.ts";
+import { profileForEnterprise, type CommitConfirm } from "./profiles.ts";
 import type { MibStore } from "./mib.ts";
 import type { ChangeSet, Credential, DeviceState, Edit, FdbEntry, LldpNeighbor } from "./model.ts";
 import type { SaveResult } from "./save.ts";
+
+/**
+ * Outcome of the rollback-timer hook for one applyDevice call (only present when a profile defines
+ * commitConfirm AND the caller opted in). `armed`/`confirmed` reflect which SETs succeeded; `error`
+ * carries a best-effort failure note. Inert by default — see VendorProfile.commitConfirm.
+ */
+export interface CommitConfirmResult {
+  configured: boolean;
+  armed: boolean;
+  confirmed: boolean;
+  error?: string;
+}
 
 /** Convenience: connect read-only and return a full DeviceState. */
 export async function readDevice(host: string, credential: Credential): Promise<DeviceState> {
@@ -151,13 +164,29 @@ export async function planDevice(
  *    `reachableAfter` on the result.
  *  - Save (running -> startup) ONLY happens when opts.save AND reachableAfter; never automatically.
  *  - The existing per-edit read-back verify + rollback-on-SET-error behaviour is left intact.
+ *
+ * Rollback-timer hook (SAFE no-op framework — VendorProfile.commitConfirm): if the device's profile
+ * DEFINES commitConfirm AND the caller opts in with opts.commitConfirm===true, we ARM the device's
+ * rollback timer before the writes and CONFIRM it after a successful reachability check (cancelling
+ * the auto-revert). No profile ships a commitConfirm value today, so by default this is inert and the
+ * apply path behaves exactly as before. This is an extension point pending hardware proven to support
+ * a standard SNMP rollback timer; it NEVER changes the default no-auto-save behaviour. Arming/confirm
+ * failures are surfaced on the result but never abort the apply (best-effort, like save).
  */
 export async function applyDevice(
   host: string,
   credential: Credential,
   edits: Edit[],
-  opts: { save?: boolean; acknowledge?: Acknowledge; sourceMac?: string; mgmtVlan?: number; mib?: MibStore } = {},
-): Promise<{ changeSet: ChangeSet; save?: SaveResult; reachableAfter?: boolean }> {
+  opts: {
+    save?: boolean;
+    acknowledge?: Acknowledge;
+    sourceMac?: string;
+    mgmtVlan?: number;
+    mib?: MibStore;
+    /** Opt in to the profile's rollback-timer hook (see commitConfirm). Inert unless a profile defines it. */
+    commitConfirm?: boolean;
+  } = {},
+): Promise<{ changeSet: ChangeSet; save?: SaveResult; reachableAfter?: boolean; commitConfirm?: CommitConfirmResult }> {
   const client = new SnmpClient(host, credential);
   try {
     const { device, capabilities } = await probe(client, host);
@@ -193,6 +222,21 @@ export async function applyDevice(
       };
     }
 
+    // 1b. Rollback-timer hook (SAFE no-op framework): arm BEFORE writes, but only when the profile
+    //     defines commitConfirm AND the caller opted in. No profile ships a value, so this is inert by
+    //     default. Best-effort: an arm failure is recorded but does not abort the apply.
+    const cc = opts.commitConfirm ? profileForEnterprise(device.vendorEnterprise).commitConfirm : undefined;
+    let commitConfirm: CommitConfirmResult | undefined;
+    if (cc) {
+      commitConfirm = { configured: true, armed: false, confirmed: false };
+      try {
+        await client.set([{ oid: cc.armOid, type: 2 /* Integer */, value: cc.armValue ?? cc.timeoutSec }]);
+        commitConfirm.armed = true;
+      } catch (e) {
+        commitConfirm.error = `arm failed: ${(e as Error).message}`;
+      }
+    }
+
     // 2. Apply (existing verify/rollback path, unchanged). Pass the MIB store so a generic
     //    setObject without an explicit snmpType can infer its wire type from the SYNTAX.
     const applied = await applyChangeSet(client, state, cs, { mib: opts.mib });
@@ -202,10 +246,26 @@ export async function applyDevice(
     //    empty read counts as NOT reachable, so we never auto-save on an uncertain link.
     const reachableAfter = await recheckReachable(client);
 
+    // 3b. Confirm the rollback timer ONLY after a successful reachability check (link survived) — that
+    //     cancels the device's auto-revert and keeps the changes. If we're not reachable we deliberately
+    //     do NOT confirm, letting the device auto-revert and recover the lockout.
+    if (cc && commitConfirm?.armed) {
+      if (reachableAfter) {
+        try {
+          await client.set([{ oid: cc.confirmOid, type: 2 /* Integer */, value: cc.confirmValue ?? 1 }]);
+          commitConfirm.confirmed = true;
+        } catch (e) {
+          commitConfirm.error = `confirm failed: ${(e as Error).message}`;
+        }
+      } else {
+        commitConfirm.error = "not reachable after apply — left unconfirmed so the device auto-reverts";
+      }
+    }
+
     // 4. Save ONLY when explicitly requested AND reachable. Never auto-save.
     const save = opts.save && reachableAfter ? await saveRunningConfig(client, device) : undefined;
 
-    return { changeSet: applied, save, reachableAfter };
+    return { changeSet: applied, save, reachableAfter, commitConfirm };
   } finally {
     client.close();
   }

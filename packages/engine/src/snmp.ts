@@ -82,11 +82,65 @@ export class SnmpClient {
   }
 
   /**
-   * Walk a single table column and return a map of row-index (the OID suffix after the
-   * column base) -> value.
+   * GETBULK walk of a subtree (v2c). Far fewer round-trips than the GETNEXT walk(): each PDU asks
+   * the agent for up to `maxRepetitions` successor varbinds at once, so a 50-row column comes back
+   * in ~2 PDUs instead of ~50. Returns all non-error varbinds under baseOid, in OID order.
+   *
+   * Why a hand-rolled loop instead of net-snmp's subtree(): subtree() uses GETNEXT one varbind at a
+   * time; getBulk() exposes the repetition count that makes a table load cheap. We page until the
+   * agent walks out of the subtree (an OID no longer under baseOid) or signals endOfMibView.
+   * Read-only: issues only GETBULK requests on the read session, never a SET.
    */
-  async column(columnOid: string): Promise<Map<string, VarBind>> {
-    const vbs = await this.walk(columnOid);
+  walkBulk(baseOid: string, maxRepetitions = 20): Promise<VarBind[]> {
+    const base = baseOid.endsWith(".") ? baseOid.slice(0, -1) : baseOid;
+    const underBase = (oid: string) => oid === base || oid.startsWith(base + ".");
+    return new Promise((resolve, reject) => {
+      const out: VarBind[] = [];
+      const step = (from: string) => {
+        // getBulk(oids, nonRepeaters, maxRepetitions, cb): 0 non-repeaters, page of maxRepetitions.
+        this.readSession.getBulk([from], 0, maxRepetitions, (err: Error | null, varbinds: any[]) => {
+          if (err) return reject(err);
+          let last = from;
+          let done = false;
+          for (const vb of varbinds) {
+            // endOfMibView (130) ends the walk; other per-varbind errors (noSuchObject/Instance) are
+            // skipped but we keep paging from the last good OID.
+            if (snmp.isVarbindError(vb)) {
+              if (vb.type === 130) { done = true; break; }
+              continue;
+            }
+            if (!underBase(vb.oid)) { done = true; break; }
+            out.push(toVarBind(vb));
+            last = vb.oid;
+          }
+          // No progress (agent returned nothing new under base) -> stop, else page from the last OID.
+          if (done || varbinds.length === 0 || last === from) return resolve(out);
+          step(last);
+        });
+      };
+      step(base);
+    });
+  }
+
+  /**
+   * Walk a single table column and return a map of row-index (the OID suffix after the column base)
+   * -> value. `opts.bulk` (default true) uses the GETBULK walk for far fewer round-trips, falling
+   * back to the GETNEXT walk() if the device errors on bulk (some old/locked agents reject GETBULK
+   * or cap the PDU). Read-only; per-row keying is identical regardless of which walk produced it.
+   */
+  async column(columnOid: string, opts: { bulk?: boolean } = {}): Promise<Map<string, VarBind>> {
+    const useBulk = opts.bulk ?? true;
+    let vbs: VarBind[];
+    if (useBulk) {
+      try {
+        vbs = await this.walkBulk(columnOid);
+      } catch {
+        // Device rejected/failed GETBULK -> fall back to the serial GETNEXT walk. Same result shape.
+        vbs = await this.walk(columnOid);
+      }
+    } else {
+      vbs = await this.walk(columnOid);
+    }
     const map = new Map<string, VarBind>();
     const prefix = columnOid.endsWith(".") ? columnOid : columnOid + ".";
     for (const vb of vbs) {

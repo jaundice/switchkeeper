@@ -44,6 +44,23 @@ one dead UI per box.
 - **Three hosts, one engine**: Electron desktop app, a headless server that also serves a
   PWA web UI + REST API, and an **MCP server** so agents can manage switches.
 
+## MIB-driven management
+
+Beyond the standard slice (interfaces, VLANs, PoE, LAGs), Switchkeeper builds an
+**adaptive capability model** of each switch: curated System/Ports/VLANs/PoE/LLDP
+sections plus generic vendor sections assembled automatically from the device's **own
+loaded MIBs**. Import your vendor's MIBs and anything those MIBs describe becomes
+readable by name — and, in Advanced mode, editable with type-aware editors (enum
+dropdowns, ranged numbers, BITS checkboxes, booleans) — without a hand-coded driver for
+that vendor. A switch with no vendor MIBs loaded reads exactly as before.
+
+Generic writes run through a **SafetyEngine** that detects your management path, refuses
+edits that would lock you out (blocked) or risk disruption (risky) unless you explicitly
+acknowledge them, applies to **running config only**, and never auto-persists to startup —
+so a reboot recovers from a bad change. The same gate covers the MCP tools.
+
+See **[docs/mib-driven-management.md](./docs/mib-driven-management.md)** for the full guide.
+
 ## Install
 
 ### Docker (server + web UI + MCP)

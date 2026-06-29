@@ -8,6 +8,30 @@ export type SaveMethod =
   | { kind: "trigger"; oid: string; value?: number } // set a scalar to commit
   | { kind: "copyRunningToStartup"; baseOid: string }; // RADLAN-COPY-MIB rlCopyEntry base
 
+/**
+ * Optional rollback-timer (commit-confirm) hook. SAFE EXTENSION POINT — no vendor currently sets it.
+ *
+ * The idea (where a device supports it over SNMP): before writing, "arm" a rollback timer by setting
+ * armOid; if the management link survives the post-apply reachability check, "confirm" by setting
+ * confirmOid (cancelling the timer) — otherwise the device auto-reverts after timeoutSec, recovering a
+ * lockout without a truck roll. There is NO standard SNMP object for this and none of the profiles we
+ * ship have a confirmed armOid/confirmOid, so this is wired as a NO-OP framework: applyDevice only
+ * arms/confirms when a profile DEFINES this AND the caller opts in (opts.commitConfirm===true). It
+ * never changes the default no-auto-save behaviour. Populate per-vendor only once hardware is proven.
+ */
+export interface CommitConfirm {
+  /** Set to start the rollback timer before the writes land. */
+  armOid: string;
+  /** Set after the reachability check to cancel the timer and keep the changes. */
+  confirmOid: string;
+  /** Seconds the device waits before auto-reverting if confirmOid isn't set. */
+  timeoutSec: number;
+  /** Value to write to armOid (defaults to timeoutSec when the OID takes the timeout directly). */
+  armValue?: number;
+  /** Value to write to confirmOid (defaults to 1). */
+  confirmValue?: number;
+}
+
 export interface VendorProfile {
   enterprise: number;
   name: string;
@@ -29,6 +53,11 @@ export interface VendorProfile {
   save?: SaveMethod;
   /** Shown when no save method is known for the model (instead of guessing a write). */
   saveConfigNote?: string;
+  /**
+   * Optional rollback-timer hook (SAFE no-op extension point). No vendor ships a value here yet — see
+   * CommitConfirm. applyDevice only uses it when both this is set AND the caller opts in.
+   */
+  commitConfirm?: CommitConfirm;
   notes?: string;
 }
 

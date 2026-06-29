@@ -48,6 +48,12 @@ const MOCK_SAFETY = {
   worst: "blocked",
 };
 
+// Diff / change history: an in-session log of applied change-sets (no persistence per the contract).
+// Each entry: { ts (ISO), host, items:[{ label, before, after, cls }], status, reachableAfter }.
+// `before`/`after`/`cls` are best-effort from the reviewed plan + the model; the panel below renders
+// it collapsibly. Populated in applyEdits() right after a successful apply.
+const changeHistory = [];
+
 // Captured between the plan (review) and apply steps:
 let lastPlanSafety = null; // SafetyReport from the most recent dry-run plan (or null)
 let lastApply = null;      // { reachableAfter } from the most recent successful apply (or null)
@@ -542,6 +548,9 @@ async function applyEdits(acknowledge) {
     const n = edits.length;
     // Apply succeeded. Record reachability so the (separate) Save-to-startup action can gate on it.
     lastApply = { reachableAfter: data.reachableAfter === true };
+    // Diff / change history: snapshot what just landed BEFORE clearPendingState() wipes the staging
+    // state. Classification comes from the reviewed plan (lastPlanSafety); before/after are best-effort.
+    recordHistory(edits, cs, data.reachableAfter === true);
     clearPendingState();
     setStatus("applied " + n + " change(s)");
     await connect();           // re-read (rebuilds the grid + pending bar)
@@ -587,6 +596,122 @@ async function saveToStartup() {
   if (s && s.ok) { renderPending(); setStatus("config saved to startup"); }
   else if (s && s.supported === false) { renderPending(); setStatus("SNMP save not available here - use 'open UI' then Maintenance > Save Configuration"); }
   else { renderPending(); setStatus("save: " + (s ? s.message : "no result"), "error"); }
+}
+
+// Build a history entry from the just-applied edits + the reviewed plan's classifications, and push it.
+// `before` is read from the current model (scalars) where we can find it; grid edits don't have a
+// single before/after value so we record the human label only. After re-render the History panel shows it.
+function recordHistory(edits, changeSet, reachableAfter) {
+  const cls = (lastPlanSafety && lastPlanSafety.classifications) || [];
+  // Match a classification to an edit by reference first, else by a structural label match.
+  const clsFor = (e) => {
+    const byRef = cls.find((c) => c.edit === e);
+    if (byRef) return byRef.cls;
+    const lbl = editLabel(e);
+    const byLabel = cls.find((c) => editLabel(c.edit) === lbl);
+    return byLabel ? byLabel.cls : "";
+  };
+  const items = edits.map((e) => {
+    let before = "";
+    let after = "";
+    if (e.kind === "setObject") {
+      before = currentObjectValue(e.oid, e.name);
+      after = e.value;
+    }
+    return { label: editLabel(e), before, after, cls: clsFor(e) };
+  });
+  changeHistory.unshift({
+    ts: new Date().toISOString(),
+    host: $("host").value.trim(),
+    items,
+    status: (changeSet && changeSet.status) || "verified",
+    reachableAfter,
+  });
+}
+
+// Look up a scalar's (or table cell's) current value from the capability model by OID/name, for the
+// "before" column of the history diff. The model carries the pre-apply value (history is recorded
+// before the re-read), so this is the value the operator changed FROM. Returns "" if not found.
+function currentObjectValue(oid, name) {
+  const baseOid = String(oid || "").replace(/\.0$/, "");
+  for (const s of (lastCaps?.sections || [])) {
+    for (const sc of (s.scalars || [])) {
+      if ((name && sc.name === name) || (oid && (sc.oid === oid || sc.oid === baseOid))) {
+        return sc.value == null ? "" : String(sc.value);
+      }
+    }
+  }
+  return "";
+}
+
+// Collapsible "History" panel: renders the in-session change log. Empty until a successful apply.
+// Lives in the #history container (toggled from the header History button). No persistence.
+function renderHistory() {
+  const panel = $("history");
+  if (!panel) return;
+  if (!changeHistory.length) {
+    panel.innerHTML = `<h2>Change history</h2><p class="empty">No changes applied this session.</p>`;
+    return;
+  }
+  const sets = changeHistory.map((h) => {
+    const when = new Date(h.ts).toLocaleString();
+    const rows = h.items.map((it) => {
+      const k = it.cls === "blocked" ? "blocked" : it.cls === "risky" ? "risky" : "safe";
+      const tag = it.cls ? `<span class="tag ${k}">${esc(it.cls)}</span>` : "";
+      const diff = (it.before !== "" || it.after !== "")
+        ? `<span class="hdiff"><span class="empty">${esc(it.before || "∅")}</span> → <b>${esc(it.after || "∅")}</b></span>` : "";
+      return `<li class="hitem">${tag}<span class="hlabel">${esc(it.label)}</span> ${diff}</li>`;
+    }).join("");
+    const reach = h.reachableAfter ? "reachable" : "reachability unconfirmed";
+    return `<div class="hset">
+        <div class="hhead"><b>${esc(when)}</b> · ${esc(h.host)} · <span class="ok">${esc(h.status)}</span>
+          <span class="empty">(${esc(reach)})</span></div>
+        <ul class="hlist">${rows}</ul>
+      </div>`;
+  }).join("");
+  panel.innerHTML = `<h2>Change history (${changeHistory.length} apply${changeHistory.length === 1 ? "" : " events"})</h2>${sets}`;
+}
+
+function toggleHistory() {
+  const panel = $("history");
+  if (!panel) return;
+  if (panel.style.display === "block") { panel.style.display = "none"; return; }
+  renderHistory();
+  panel.style.display = "block";
+}
+
+// Snapshot / export: download the current capability model (curated + scalars + any loaded tables)
+// plus host + ISO timestamp as a JSON file, via a client-side Blob + anchor download. The loaded-table
+// cache (loadedTables) is merged back into each section so a table the operator expanded is exported
+// with its rows; un-loaded lazy stubs export as stubs (rows omitted). Read-only; no device traffic.
+function exportSnapshot() {
+  if (!lastCaps) { setStatus("open Details first to export the capability model", "error"); return; }
+  // Deep-ish clone so we can fold loaded rows in without mutating the live model.
+  const model = JSON.parse(JSON.stringify(lastCaps));
+  for (const s of (model.sections || [])) {
+    const loaded = loadedTables.get(s.id);
+    if (loaded && s.table) s.table = JSON.parse(JSON.stringify(loaded)); // export the rows the user loaded
+  }
+  const snapshot = {
+    tool: "switchkeeper",
+    exportedAt: new Date().toISOString(),
+    host: model.host || $("host").value.trim(),
+    vendor: model.vendor || null,
+    mibs: model.mibs || null,
+    capabilities: model.sections || [],
+  };
+  const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  const stamp = snapshot.exportedAt.replace(/[:.]/g, "-");
+  const host = (snapshot.host || "device").replace(/[^a-zA-Z0-9._-]/g, "_");
+  a.href = url;
+  a.download = `switchkeeper-${host}-${stamp}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url); // free the blob once the download has been kicked off
+  setStatus("exported capability snapshot");
 }
 
 function getCred() {
@@ -794,6 +919,12 @@ const CAPS_USE_MOCK = false;
 // Advanced mode: off by default, persisted in-memory for the session only (per spec).
 let advancedMode = false;
 
+// Search/filter: a case-insensitive substring filter over the generic sections' objects/rows (by
+// name/oid/value). Held in-session; applied in renderCapabilities so a big device stays navigable.
+// Empty string = no filter (everything shows). Curated sections are NOT filtered (they're small +
+// always-relevant); the filter targets the potentially-huge generic vendor sections.
+let capFilter = "";
+
 // A realistic CapabilityModel fixture matching the Phase-1 contract shape:
 // one curated scalar section (system), one curated table section (ports), one generic section.
 const MOCK_CAPABILITIES = {
@@ -899,6 +1030,53 @@ let lastCaps = null; // cache so the Advanced toggle can re-render without re-fe
 const loadedTables = new Map(); // entry id -> loaded CapabilityTable (rows + rowKeys, lazy:false)
 const expandedTables = new Set(); // entry ids the user has expanded (so re-renders keep them open)
 
+// --- Search/filter helpers -----------------------------------------------------------------------
+// A scalar matches the filter if its name, oid, or value contains the (lower-cased) needle.
+function scalarMatches(s, needle) {
+  if (!needle) return true;
+  return [s.name, s.oid, s.value].some((v) => String(v ?? "").toLowerCase().includes(needle));
+}
+// A table row matches if any cell (or the row's instance key) contains the needle.
+function rowMatches(row, key, needle) {
+  if (!needle) return true;
+  if (key != null && String(key).toLowerCase().includes(needle)) return true;
+  return (row || []).some((c) => String(c ?? "").toLowerCase().includes(needle));
+}
+
+// Return a filtered shallow copy of a section for the generic-section filter. Curated sections pass
+// through untouched. For a generic section we drop non-matching scalars and non-matching table rows
+// (keeping rowKeys aligned). A loaded table is filtered too. Returns null if NOTHING in the section
+// matches (so renderCapabilities can omit the empty section). The filter never mutates the model.
+function filterSection(section, needle) {
+  if (!needle || section.kind !== "generic") return section;
+  const out = { ...section };
+  let any = false;
+  if (Array.isArray(section.scalars)) {
+    out.scalars = section.scalars.filter((s) => scalarMatches(s, needle));
+    if (out.scalars.length) any = true;
+  }
+  // Filter the table the user actually sees: the loaded one if present, else the section's own.
+  const baseTable = loadedTables.get(section.id) || section.table;
+  if (baseTable && Array.isArray(baseTable.rows) && baseTable.rows.length) {
+    const keys = Array.isArray(baseTable.rowKeys) ? baseTable.rowKeys : null;
+    const rows = [];
+    const rowKeys = [];
+    baseTable.rows.forEach((row, i) => {
+      const key = keys ? keys[i] : null;
+      if (rowMatches(row, key, needle)) { rows.push(row); if (keys) rowKeys.push(key); }
+    });
+    if (rows.length) {
+      any = true;
+      out.table = { ...baseTable, rows, ...(keys ? { rowKeys } : {}) };
+      out._filteredTable = true; // mark so renderCapabilities renders this directly (not via the cache)
+    }
+  } else if (baseTable) {
+    // A not-yet-loaded lazy stub: keep it visible so the operator can still load + then filter rows.
+    any = true;
+  }
+  return any ? out : null;
+}
+
 // editable: when true (generic section + Advanced mode) each scalar gets an "Edit" affordance whose
 // click fetches object-meta and renders the type-aware widget. sectionId namespaces the row ids so
 // multiple sections coexist. Read-only objects (per the fetched MibSyntax.access) stay display-only.
@@ -913,9 +1091,51 @@ function capScalarTable(scalars, editable, sectionId) {
       : "";
     // A dedicated row beneath each object holds its inline editor when opened.
     const ed = editable ? `<tr id="objed_${esc(rid)}" style="display:none"><td colspan="3"></td></tr>` : "";
-    return `<tr><th title="${esc(s.oid || "")}">${esc(s.name)}</th><td class="val">${v}${t}</td>${act}</tr>${ed}`;
+    // Descriptions/units tooltip: the name cell carries the OID as a baseline title and a `tip` hook so
+    // the MIB description/units lazy-fetch via object-meta on hover (cached per name; see wireTooltips).
+    return `<tr><th class="tip" title="${esc(s.oid || "")}" data-tip-name="${esc(s.name || "")}"` +
+      ` data-tip-oid="${esc(s.oid || "")}">${esc(s.name)}</th><td class="val">${v}${t}</td>${act}</tr>${ed}`;
   }).join("");
   return `<table class="kv-table"><tbody>${rows}</tbody></table>`;
+}
+
+// Descriptions/units tooltips: cache of fetched MIB meta per symbol/oid so a hover only fetches once.
+const tooltipCache = new Map(); // key (name||oid) -> resolved title string ("" if nothing useful)
+
+// Lazy-fetch a tooltip for a `.tip` element on first hover: pull object-meta, build a description/units
+// string, cache it, and set it as the element's title. Unobtrusive: until hovered we show only the OID
+// baseline title; if no description/units exist, we keep the OID. Read-only — uses the same object-meta
+// path the editor uses. Cancelled cheaply if meta is missing (engine still indexing).
+async function fetchTooltip(el) {
+  const name = el.dataset.tipName || "";
+  const oid = el.dataset.tipOid || "";
+  const key = name || oid;
+  if (!key || el.dataset.tipDone) return;
+  el.dataset.tipDone = "1"; // fetch at most once per element regardless of outcome
+  if (tooltipCache.has(key)) { applyTooltip(el, tooltipCache.get(key)); return; }
+  const syntax = await fetchSyntax(name, oid);
+  let tip = "";
+  if (syntax) {
+    const bits = [];
+    if (syntax.description) bits.push(syntax.description);
+    if (syntax.units) bits.push("Units: " + syntax.units);
+    tip = bits.join("\n");
+  }
+  tooltipCache.set(key, tip);
+  applyTooltip(el, tip);
+}
+function applyTooltip(el, tip) {
+  if (!tip) return; // nothing extra to surface — leave the OID baseline title in place
+  const oid = el.dataset.tipOid || "";
+  el.title = oid ? `${tip}\n${oid}` : tip; // description/units first, OID for reference underneath
+}
+
+// Wire all `.tip` elements in a container to lazy-fetch their MIB description/units on first hover.
+function wireTooltips(container) {
+  if (!container) return;
+  container.querySelectorAll(".tip").forEach((el) => {
+    el.addEventListener("mouseenter", () => fetchTooltip(el), { once: false });
+  });
 }
 
 // Render a generic TABLE section (columns × rows). When `editable` (generic section + Advanced mode)
@@ -932,7 +1152,17 @@ function capDataTable(table, editable, sectionId) {
   const cols = table.columns || [];
   const meta = (editable && Array.isArray(table.columnMeta)) ? table.columnMeta : null;
   const keys = (editable && Array.isArray(table.rowKeys)) ? table.rowKeys : null;
-  const head = cols.map((c) => `<th>${esc(c)}</th>`).join("");
+  // Column-header tooltips: when columnMeta is present (independent of `editable`), each header carries
+  // the column symbol + OID and a `tip` hook so its MIB description/units lazy-fetch on hover.
+  const cmeta = Array.isArray(table.columnMeta) ? table.columnMeta : null;
+  const head = cols.map((c, ci) => {
+    const cm = cmeta && cmeta[ci];
+    if (cm && (cm.name || cm.oid)) {
+      return `<th class="tip" title="${esc(cm.oid || "")}" data-tip-name="${esc(cm.name || "")}"` +
+        ` data-tip-oid="${esc(cm.oid || "")}">${esc(c)}</th>`;
+    }
+    return `<th>${esc(c)}</th>`;
+  }).join("");
 
   const body = (table.rows || []).map((row, r) => {
     const rid = `${sectionId || "tbl"}_${r}`;
@@ -973,6 +1203,9 @@ function capDataTable(table, editable, sectionId) {
 // `editable`/`sectionId` are threaded straight through to capDataTable (cell editor wiring is identical).
 function capTableSection(section, editable, sectionId) {
   const t = section.table || {};
+  // Search/filter: filterSection() may have already substituted a filtered `table` into the section
+  // (marked _filteredTable). Render that directly — don't fall back to the unfiltered loaded-table cache.
+  if (section._filteredTable) return capDataTable(t, editable, sectionId);
   // A loaded table (cache hit) takes the place of the stub: render its rows like any other table.
   const cached = loadedTables.get(section.id);
   if (cached) return capDataTable(cached, editable, sectionId);
@@ -1032,7 +1265,13 @@ function renderCapabilities(model) {
   const sections = model.sections || [];
   const generic = sections.filter((s) => s.kind === "generic");
   // Curated sections always render; generic ones only when Advanced mode is on.
-  const visible = sections.filter((s) => s.kind !== "generic" || advancedMode);
+  const candidates = sections.filter((s) => s.kind !== "generic" || advancedMode);
+  // Search/filter: apply the (generic-section-only) filter; filterSection returns null for a generic
+  // section with no match (it's dropped). Curated sections always pass through unfiltered.
+  const needle = capFilter.trim().toLowerCase();
+  const visible = candidates.map((s) => filterSection(s, needle)).filter(Boolean);
+  const filteredOut = needle ? (candidates.filter((s) => s.kind === "generic").length -
+    visible.filter((s) => s.kind === "generic").length) : 0;
 
   const sectionHtml = visible.map((s, si) => {
     const gtag = s.kind === "generic" ? ` <span class="gtag">generic</span>` : "";
@@ -1049,6 +1288,8 @@ function renderCapabilities(model) {
   const advClass = advancedMode ? "advtoggle on" : "advtoggle";
   const hiddenNote = (!advancedMode && generic.length)
     ? `<span class="sum">${generic.length} vendor section${generic.length === 1 ? "" : "s"} hidden</span>` : "";
+  const filterNote = (needle && filteredOut > 0)
+    ? `<span class="sum">${filteredOut} section${filteredOut === 1 ? "" : "s"} filtered out</span>` : "";
   const mibs = model.mibs || { loaded: 0, indexed: 0 };
 
   panel.innerHTML =
@@ -1056,13 +1297,19 @@ function renderCapabilities(model) {
        <span class="sum">vendor <b>${esc(model.vendor || "Unknown")}</b></span>
        <span class="sum">MIBs loaded <b>${esc(mibs.loaded ?? 0)}</b> · indexed <b>${esc(mibs.indexed ?? 0)}</b></span>
        ${hiddenNote}
+       ${filterNote}
        <span class="spacer"></span>
+       <input id="capFilter" class="capfilter" type="search" placeholder="filter objects (name / oid / value)"
+         value="${esc(capFilter)}" title="Filter the generic vendor sections by name, OID, or value (Advanced mode)">
+       <button id="capExport" class="linkbtn" title="Download the current capability model (curated + scalars + loaded tables) as JSON">Export</button>
        <label class="${advClass}" title="Show generic vendor objects exposed by the device's MIBs (read-only)">
          <input type="checkbox" id="advChk" ${advancedMode ? "checked" : ""}> Advanced mode
        </label>
      </div>` +
     (advancedMode ? `<div class="advbanner">Advanced mode ON — showing all generic vendor objects the MIBs expose (read-only).</div>` : "") +
-    (sections.length ? sectionHtml : `<p class="empty" style="margin-top:14px">No capability sections${mibs.loaded ? "" : " (no MIBs loaded — import the device's MIBs to see vendor objects)"}.</p>`);
+    (sections.length ? sectionHtml : `<p class="empty" style="margin-top:14px">No capability sections${mibs.loaded ? "" : " (no MIBs loaded — import the device's MIBs to see vendor objects)"}.</p>`) +
+    (needle && !visible.some((s) => s.kind === "generic") && generic.length
+      ? `<p class="empty" style="margin-top:14px">No generic objects match “${esc(capFilter)}”.</p>` : "");
 
   const chk = $("advChk");
   if (chk) chk.addEventListener("change", () => {
@@ -1071,6 +1318,24 @@ function renderCapabilities(model) {
     // Keep the safety review's gating in sync if a review/apply bar is open (shared toggle).
     if (lastPlanSafety || lastApply) renderPending();
   });
+
+  // Search/filter: re-render on input. Preserve caret/focus by re-focusing the box after re-render
+  // (renderCapabilities rebuilds the panel HTML each keystroke; the input is cheap to re-focus).
+  const flt = $("capFilter");
+  if (flt) flt.addEventListener("input", () => {
+    capFilter = flt.value;
+    const caret = flt.selectionStart;
+    renderCapabilities(lastCaps);
+    const again = $("capFilter");
+    if (again) { again.focus(); try { again.setSelectionRange(caret, caret); } catch (e) { /* search inputs may reject */ } }
+  });
+
+  // Snapshot / export button.
+  const exp = $("capExport");
+  if (exp) exp.addEventListener("click", exportSnapshot);
+
+  // Descriptions/units tooltips: wire all .tip elements (scalar names + table headers) to lazy-fetch.
+  wireTooltips(panel);
 
   // Phase 3: wire each generic SCALAR "Edit" button to open its type-aware editor.
   panel.querySelectorAll("button.editbtn:not(.cellbtn)").forEach((btn) => {
@@ -1175,6 +1440,26 @@ function editorWidget(syntax, currentValue) {
     const step = ' step="1"';
     return { html: `<input type="number" id="objval"${min}${max}${step} value="${esc(currentValue ?? "")}">`, kind: "number" };
   }
+  // BITS: a SET in SNMP is an OCTET STRING where each named bit occupies a fixed bit position
+  // (enums[].value = bit position, 0-based, per the cross-cutting contract). Render one checkbox
+  // per named bit so the operator toggles named flags rather than hand-editing a hex string; on
+  // Review we encode the chosen positions back to the octet-string value (see readEditorValue).
+  if (base === "bits") {
+    const enums = (syntax.enums && syntax.enums.length) ? syntax.enums : [];
+    if (enums.length) {
+      // Pre-tick boxes whose bit is set in the current value (decoded from the displayed hex string).
+      const setNow = decodeBitsValue(currentValue);
+      const boxes = enums.map((e) => {
+        const pos = Number(e.value);
+        const on = setNow.has(pos) ? " checked" : "";
+        return `<label class="bitbox"><input type="checkbox" class="bitchk" data-pos="${esc(pos)}"${on}> ` +
+          `${esc(e.label)} <span class="empty">(${esc(pos)})</span></label>`;
+      }).join("");
+      return { html: `<span id="objval" class="bitgroup">${boxes}</span>`, kind: "bits" };
+    }
+    // No named bits available — fall back to free text (operator can type the hex octet string).
+    return { html: `<input type="text" id="objval" value="${esc(currentValue ?? "")}">`, kind: "text" };
+  }
   // string / oid / ipaddress / bits / unknown -> text input (sizeRange caps OCTET STRING length).
   const sz = syntax.sizeRange || {};
   const ml = sz.max != null ? ` maxlength="${esc(sz.max)}"` : "";
@@ -1189,7 +1474,40 @@ function readEditorValue(kind) {
     const n = Number(el.value);
     return Number.isFinite(n) ? n : el.value; // leave non-numeric as-is; engine validates defensively
   }
+  if (kind === "bits") {
+    // Gather the ticked bit positions and encode them into the SNMP OCTET STRING value (see encodeBits).
+    const positions = [...el.querySelectorAll("input.bitchk:checked")].map((c) => Number(c.dataset.pos));
+    return encodeBits(positions);
+  }
   return el.value;
+}
+
+// Encode a set of named-bit POSITIONS into the SNMP BITS octet string per the cross-cutting contract:
+// big-endian bit string — position p lives in byte (p >> 3), mask (0x80 >> (p & 7)). The result is the
+// hex string the engine's setObject/coerceSetValue expects for a resolved base of "bits". An empty
+// selection still yields a (minimal) zero-length-ish string of "00" so the varbind clears all bits.
+function encodeBits(positions) {
+  if (!positions.length) return "00"; // no bits set: one zero byte (engine builds an OctetString)
+  const maxPos = Math.max(...positions);
+  const bytes = new Array((maxPos >> 3) + 1).fill(0);
+  for (const p of positions) bytes[p >> 3] |= 0x80 >> (p & 7);
+  return bytes.map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// Decode a displayed BITS octet string (hex, with or without separators) back to the set of positions
+// that are set, so the checkbox group can pre-tick the current state. Tolerant of "0x" prefixes and
+// ":"/" " separators; anything unparseable yields an empty set (operator just starts from cleared).
+function decodeBitsValue(value) {
+  const set = new Set();
+  if (value == null) return set;
+  const hex = String(value).trim().replace(/^0x/i, "").replace(/[\s:]/g, "");
+  if (!/^[0-9a-fA-F]*$/.test(hex) || hex.length % 2 !== 0) return set;
+  for (let i = 0; i < hex.length; i += 2) {
+    const byte = parseInt(hex.slice(i, i + 2), 16);
+    const base = (i / 2) * 8;
+    for (let bit = 0; bit < 8; bit++) if (byte & (0x80 >> bit)) set.add(base + bit);
+  }
+  return set;
 }
 
 async function openObjectEditor(name, oid, rid, btn) {
@@ -1410,6 +1728,7 @@ $("connect").addEventListener("click", connect);
 $("refresh").addEventListener("click", connect);
 $("topoBtn").addEventListener("click", loadTopology);
 $("capBtn").addEventListener("click", loadCapabilities);
+$("histBtn").addEventListener("click", toggleHistory);
 $("discoverBtn").addEventListener("click", openDiscover);
 $("saveBtn").addEventListener("click", saveConfig);
 $("version").addEventListener("change", toggleVersion);

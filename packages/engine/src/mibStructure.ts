@@ -255,6 +255,12 @@ const VLAN_INDEX_HINTS = ["vlanindex", "vlanid", "dot1qvlan", "dot1qfdbid"];
 // INDEX element names that identify an interface (ifIndex). The standard ifIndex, plus the common
 // IF-MIB augmentation pattern. Again matched as a substring, leading element only.
 const IFINDEX_HINTS = ["ifindex"];
+// INDEX element names that identify a bridge port (dot1dBasePort and the common vendor variants).
+// A bridge-port index maps DIRECTLY to a Port.bridgePort, so no ifIndex->port translation is needed.
+// Conservative substring match, leading element only. We require the hint to END in "port" so a
+// column merely *named* with "port" inside (e.g. "portSpeed") never counts — only true *...Port index
+// element names. dot1dBasePort / dot1dStpPort / *BridgePort / a bare "port" all qualify.
+const BRIDGEPORT_INDEX_HINTS = ["dot1dbaseport", "dot1dstpport", "bridgeport", "baseport"];
 
 interface TableShape {
   columnOid: string; // a column base OID under this table (longest match used to find the owner)
@@ -265,9 +271,12 @@ interface TableShape {
  * Build a decoder mapping a full instance OID to the entity its row represents, using the owning
  * table's INDEX clause. Returns a closure so the (one-time) module enumeration is cached.
  *
- *  - single INDEX { ifIndex }                 -> { port }  (ifIndex mapped to a Port via state)
- *  - INDEX whose FIRST element is a VLAN id    -> { vlan }  (the leading suffix integer)
- *  - anything else / unresolvable              -> null      (SafetyEngine treats null as risky)
+ *  - single INDEX { ifIndex }                  -> { port }  (ifIndex mapped to a Port via state)
+ *  - INDEX whose FIRST element is an ifIndex    -> { port }  even with trailing index parts (the
+ *                                                  leading suffix integer is the ifIndex)
+ *  - INDEX whose FIRST element is a bridge port -> { port }  (maps directly to Port.bridgePort)
+ *  - INDEX whose FIRST element is a VLAN id     -> { vlan }  (the leading suffix integer)
+ *  - anything else / unresolvable               -> null      (SafetyEngine treats null as risky)
  *
  * Conservative by design: when we can't confidently map a row we return null, never a guess. The
  * decoder only knows about the modules the passed-in store has loaded; with no vendor MIBs it still
@@ -289,6 +298,10 @@ export function buildRowDecoder(
   for (const p of state.ports) {
     portByIf.set(p.ifIndex, p.bridgePort ?? p.ifIndex);
   }
+  // The set of known bridge ports, so a bridge-port-indexed row can be confidently tied to a port
+  // the protected set speaks (which is keyed by bridge port).
+  const bridgePorts = new Set<number>();
+  for (const p of state.ports) if (p.bridgePort !== undefined) bridgePorts.add(p.bridgePort);
 
   return (instanceOid: string) => {
     if (!/^[0-9]+(\.[0-9]+)*$/.test(instanceOid)) return null;
@@ -297,41 +310,65 @@ export function buildRowDecoder(
       const prefix = t.columnOid + ".";
       if (!instanceOid.startsWith(prefix)) continue;
       const suffix = instanceOid.slice(prefix.length);
-      return decodeSuffix(suffix, t.indexNames, portByIf);
+      return decodeSuffix(suffix, t.indexNames, portByIf, bridgePorts);
     }
     return null; // not under any table we enumerated -> undecodable
   };
 }
 
-/** Decode an instance suffix against the table's INDEX names. Only the safely-decodable shapes. */
+/**
+ * Decode an instance suffix against the table's INDEX names. Only the safely-decodable shapes; every
+ * other shape returns null (which the SafetyEngine treats as risky, never safe).
+ *
+ * We consult ONLY the LEADING index element (the first suffix integer), because that is the only part
+ * we can map without knowing each index element's encoded width — a downstream OCTET STRING or
+ * variable-length index would make a trailing element ambiguous. So:
+ *   - leading ifIndex      -> { port } (translated via state's ifIndex->port map; the raw ifIndex if
+ *                             unknown, so an ifIndex-keyed protected set still matches)
+ *   - leading bridge port  -> { port } only when that bridge port is one we actually read (otherwise
+ *                             we can't be sure the index really is a bridge port -> null, stay risky)
+ *   - leading VLAN id      -> { vlan }
+ * A leading ifIndex/VLAN is accepted EVEN WITH trailing index parts (e.g. INDEX { ifIndex, x }), since
+ * only the leading element is needed to identify the port/VLAN the row touches.
+ */
 function decodeSuffix(
   suffix: string,
   indexNames: string[],
   portByIf: Map<number, number>,
+  bridgePorts: Set<number>,
 ): { port?: number; vlan?: number } | null {
   const parts = suffix.split(".").map(Number);
   if (!parts.length || parts.some((n) => !Number.isFinite(n))) return null;
 
   const first = (indexNames[0] ?? "").toLowerCase();
+  const lead = parts[0];
 
-  // Single INDEX { ifIndex } -> a port. Require a single-element index AND a single-element suffix so
-  // we don't misread a multi-part index as an ifIndex.
-  if (indexNames.length === 1 && IFINDEX_HINTS.some((h) => first.includes(h))) {
-    if (parts.length !== 1) return null;
-    const port = portByIf.get(parts[0]);
+  // Leading ifIndex -> a port. Single-element index keeps the original strict behaviour; a multi-part
+  // index is fine too because only the leading ifIndex identifies the port.
+  if (IFINDEX_HINTS.some((h) => first.includes(h))) {
+    if (indexNames.length === 1 && parts.length !== 1) return null; // single index must be single suffix
+    const port = portByIf.get(lead);
     // Map to a known port if we have one; if the ifIndex isn't in state we still know it's a port
     // index, but we can't tie it to a protected bridgePort — return the ifIndex itself so an
     // ifIndex-based protected set can still match. (Protected sets use bridge ports, so an unknown
     // ifIndex yields a port number that simply won't be in the set: unprotected -> risky, not safe.)
-    return { port: port ?? parts[0] };
+    return { port: port ?? lead };
   }
 
-  // INDEX whose FIRST element is a VLAN id -> a VLAN. The leading suffix integer is the VLAN.
+  // Leading bridge port (dot1dBasePort & friends) -> a port directly. Only confident when the leading
+  // integer is a bridge port we actually read; otherwise the "*port" name could be coincidental, so we
+  // stay conservative and return null (risky) rather than claim a mapping.
+  if (BRIDGEPORT_INDEX_HINTS.some((h) => first.includes(h))) {
+    if (bridgePorts.has(lead)) return { port: lead };
+    return null;
+  }
+
+  // Leading VLAN id -> a VLAN. The leading suffix integer is the VLAN (trailing parts ignored).
   if (VLAN_INDEX_HINTS.some((h) => first.includes(h))) {
-    return { vlan: parts[0] };
+    return { vlan: lead };
   }
 
-  // A bare single-element suffix with no recognised index name: too ambiguous to map safely.
+  // No recognised leading index name: too ambiguous to map safely.
   return null;
 }
 
