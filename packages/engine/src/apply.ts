@@ -1,9 +1,11 @@
 // M1 write path: turn high-level Edits into SNMP sets, plan a diff against current state,
 // and apply with read-back verification + rollback. The safety model (design section 6) lives here.
 import type { SnmpClient } from "./snmp.ts";
-import { asInt, asBuffer } from "./util.ts";
+import { asInt, asBuffer, asString } from "./util.ts";
 import { OID } from "./oids.ts";
 import { encodePortList, decodePortList } from "./portlist.ts";
+import { describeObject } from "./mibSyntax.ts";
+import type { MibStore } from "./mib.ts";
 import type {
   ChangeSet,
   DeviceState,
@@ -15,7 +17,11 @@ import type {
 } from "./model.ts";
 
 // net-snmp ASN.1 type codes (numeric, to avoid depending on ObjectType key names).
-const T = { Integer: 2, OctetString: 4, Gauge32: 66 } as const;
+const T = { Integer: 2, OctetString: 4, OID: 6, IpAddress: 64, Counter: 65, Gauge32: 66, TimeTicks: 67 } as const;
+
+// Types we build numeric (integer-family) varbinds for; everything else is an OCTET STRING / dotted
+// string. Used to coerce a generic setObject value to the right wire shape.
+const NUMERIC_TYPES = new Set<number>([T.Integer, T.Gauge32, T.Counter, T.TimeTicks]);
 
 export interface VarbindSet {
   oid: string;
@@ -29,13 +35,15 @@ export interface ApplyOptions {
   /** Ports the management path runs through; edits touching them are refused unless force. */
   managementPorts?: number[];
   force?: boolean;
+  /** MIB store, so a generic setObject without an explicit snmpType can infer it from the SYNTAX. */
+  mib?: MibStore;
 }
 
 // ---------------------------------------------------------------------------
 // Encoding: Edit -> SNMP varbinds (pure)
 // ---------------------------------------------------------------------------
 
-export function editToVarbinds(edit: Edit, state: DeviceState): VarbindSet[] {
+export function editToVarbinds(edit: Edit, state: DeviceState, mib?: MibStore): VarbindSet[] {
   const width = state.device.capabilities?.portListWidth ?? 32;
   switch (edit.kind) {
     case "setPvid":
@@ -81,7 +89,63 @@ export function editToVarbinds(edit: Edit, state: DeviceState): VarbindSet[] {
 
     case "deleteVlan":
       return [{ oid: `${OID.dot1qVlanStaticRowStatus}.${edit.vid}`, type: T.Integer, value: 6 /* destroy */ }];
+
+    case "setObject":
+      // Generic write: type comes from the edit, or is inferred from the resolved MIB SYNTAX.
+      return [setObjectVarbind(edit, mib)];
   }
+}
+
+// Build a correctly-typed varbind for a generic setObject. snmpType resolution order: the edit's
+// explicit snmpType -> describeObject(mib).snmpType -> error (we will NOT guess a type for an
+// arbitrary writable object, because an SNMP agent rejects a type-mismatched SET and we'd rather
+// fail loudly here than send a malformed write). The value is then coerced to that wire type, and
+// clearly-wrong values (non-numeric for an integer type) are rejected defensively.
+function setObjectVarbind(
+  edit: Extract<Edit, { kind: "setObject" }>,
+  mib?: MibStore,
+): VarbindSet {
+  let type = edit.snmpType;
+  if (type === undefined && mib) {
+    const syn = describeObject(mib, edit.name ?? edit.oid);
+    type = syn?.snmpType;
+  }
+  if (type === undefined) {
+    throw new Error(
+      `setObject ${edit.oid}: no snmpType given and the MIB SYNTAX could not be resolved — refusing to guess a wire type`,
+    );
+  }
+  const value = coerceSetValue(type, edit.value, edit.oid);
+  return { oid: edit.oid, type, value };
+}
+
+// Coerce a generic value to the wire shape its SNMP type needs: a number for integer-family types,
+// a Buffer for OCTET STRING, a dotted-decimal string (as bytes) for OID/IpAddress. Rejects values
+// that can't be that type — e.g. "abc" for an Integer — rather than sending nonsense to the agent.
+function coerceSetValue(type: number, raw: string | number, oid: string): number | Buffer {
+  if (NUMERIC_TYPES.has(type)) {
+    const n = typeof raw === "number" ? raw : Number(String(raw).trim());
+    if (!Number.isFinite(n)) {
+      throw new Error(`setObject ${oid}: value ${JSON.stringify(raw)} is not a valid number for this integer-typed object`);
+    }
+    if (!Number.isInteger(n)) {
+      throw new Error(`setObject ${oid}: value ${JSON.stringify(raw)} must be a whole number for this integer-typed object`);
+    }
+    return n;
+  }
+  if (type === T.IpAddress || type === T.OID) {
+    // net-snmp accepts a dotted-decimal string for IpAddress and a dotted OID string for OID.
+    const s = asString(raw).trim();
+    if (type === T.IpAddress && !/^\d{1,3}(\.\d{1,3}){3}$/.test(s)) {
+      throw new Error(`setObject ${oid}: value ${JSON.stringify(raw)} is not a dotted IPv4 address`);
+    }
+    if (type === T.OID && !/^\d+(\.\d+)*$/.test(s)) {
+      throw new Error(`setObject ${oid}: value ${JSON.stringify(raw)} is not a dotted OID`);
+    }
+    return Buffer.from(s, "utf8");
+  }
+  // Default: OCTET STRING / unknown -> raw bytes of the string form.
+  return Buffer.from(asString(raw), "utf8");
 }
 
 // ---------------------------------------------------------------------------
@@ -139,7 +203,39 @@ function describe(edit: Edit, state: DeviceState): { before: unknown; after: unk
       return { before: null, after: { vid: edit.vid, name: edit.name } };
     case "deleteVlan":
       return { before: { vid: edit.vid }, after: null };
+    case "setObject":
+      // The current (before) value needs a read-only GET against the device, which `describe` (pure)
+      // can't do. planChanges fills it via readSetObjectBefore when a client is supplied; here we
+      // record `after` and leave `before` undefined for the sync/no-client path.
+      return { before: undefined, after: { oid: edit.oid, value: edit.value } };
   }
+}
+
+/**
+ * Read-only diff enrichment for setObject edits: GET each setObject OID's current value and write it
+ * into the matching diff entry's `before` (so a plan shows what the value is changing FROM). Pure
+ * read — no SET. Best-effort: a GET error leaves `before` undefined rather than failing the plan.
+ */
+export async function readSetObjectBefore(
+  client: SnmpClient,
+  edits: Edit[],
+  diff: DiffEntry[],
+): Promise<void> {
+  const targets = edits
+    .map((e, i) => ({ e, i }))
+    .filter((x): x is { e: Extract<Edit, { kind: "setObject" }>; i: number } => x.e.kind === "setObject");
+  if (!targets.length) return;
+  let vbs: { value: unknown }[] = [];
+  try {
+    vbs = await client.get(targets.map((t) => t.e.oid));
+  } catch {
+    return; // device read failed — leave before undefined
+  }
+  targets.forEach((t, k) => {
+    const raw = vbs[k]?.value;
+    const before = raw === undefined ? undefined : Buffer.isBuffer(raw) ? asString(raw) : raw;
+    diff[t.i] = { ...diff[t.i], before: { oid: t.e.oid, value: before } };
+  });
 }
 
 /** Lockout guard: refuse/flag edits that could strand the management path. */
@@ -182,7 +278,7 @@ export async function applyChangeSet(
   const applied: { edit: Edit; rollback: VarbindSet[] }[] = [];
 
   for (const edit of cs.edits) {
-    const target = editToVarbinds(edit, state);
+    const target = editToVarbinds(edit, state, opts.mib);
     const rollback = await computeRollback(client, edit, state, target);
     try {
       await client.set(target);
@@ -235,7 +331,9 @@ async function snapshotVarbinds(client: SnmpClient, target: VarbindSet[]): Promi
   return vbs.map((vb, i) => ({
     oid: target[i].oid,
     type: target[i].type,
-    value: target[i].type === T.OctetString ? asBuffer(vb.value) : asInt(vb.value),
+    // Numeric (integer-family) types revert as a number; everything else (OCTET STRING, OID,
+    // IpAddress) reverts as the raw bytes we read back.
+    value: NUMERIC_TYPES.has(target[i].type) ? asInt(vb.value) : asBuffer(vb.value),
   }));
 }
 
@@ -275,6 +373,16 @@ async function verifyEdit(client: SnmpClient, edit: Edit, target: VarbindSet[]):
     // (e.g. EXOS) -> fall back to the static membership columns.
     const stat = await readStaticMembership(client, edit.vid);
     return setEq(wantEgress, stat.egress) && setEq(wantUntagged, stat.untagged);
+  }
+  // Generic setObject: read the OID back and compare to the value we set. OCTET STRING here is an
+  // ARBITRARY string (not a PortList), so compare bytes directly — never via decodePortList.
+  if (edit.kind === "setObject") {
+    const got = await client.get(target.map((t) => t.oid));
+    return target.every((t, i) => {
+      const v = got[i].value;
+      if (NUMERIC_TYPES.has(t.type)) return asInt(v) === (t.value as number);
+      return asBuffer(v).equals(asBuffer(t.value));
+    });
   }
   const got = await client.get(target.map((t) => t.oid));
   return target.every((t, i) => {

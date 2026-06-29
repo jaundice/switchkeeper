@@ -8,6 +8,8 @@ contextBridge.exposeInMainWorld("switchkeeper", {
   save: (req) => ipcRenderer.invoke("switch:save", req),
   topology: (req) => ipcRenderer.invoke("switch:topology", req),
   capabilities: (req) => ipcRenderer.invoke("switch:capabilities", req),
+  // Phase 3: fetch one object's MIB SYNTAX so the renderer can build a type-aware edit widget.
+  objectMeta: (req) => ipcRenderer.invoke("switch:object-meta", req),
   openUrl: (url) => ipcRenderer.invoke("open:external", url),
   openLink: (url) => ipcRenderer.invoke("open:link", url),
   mibPointers: (req) => ipcRenderer.invoke("mib:pointers", req),

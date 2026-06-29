@@ -8,6 +8,10 @@ let lastState = null;
 const pending = new Map(); // bridgePort -> { bridge, vid, orig }   (PVID edits)
 const memEdits = new Map(); // vid -> { tagged:Set, untagged:Set }  (membership edits)
 const pendingLag = new Map(); // bridgePort -> lagId|null            (LAG edits)
+// Phase 3: at most one generic-object write is staged at a time. Shape mirrors the engine Edit:
+// { kind:"setObject", oid, value, snmpType?, name? }. It rides the SAME review/gating/apply path
+// as the grid edits (collectEdits includes it; the SafetyEngine classifies it risky/blocked).
+let pendingSetObject = null;
 
 // ====================================================================================
 // Phase 2: write-safety gating (consumes ChangeSet.safety from the plan path).
@@ -73,6 +77,7 @@ function editLabel(e) {
     case "setLag": return e.lagId == null ? `Remove port ${e.bridgePort} from LAG` : `Add port ${e.bridgePort} to LAG ${e.lagId}`;
     case "createVlan": return `Create VLAN ${e.vid}${e.name ? ` (${e.name})` : ""}`;
     case "deleteVlan": return `Delete VLAN ${e.vid}`;
+    case "setObject": return `Set ${e.name ? e.name : e.oid} = ${e.value}`;
     default: return e.kind;
   }
 }
@@ -306,11 +311,30 @@ function collectEdits() {
     ...[...pending.values()].map((p) => ({ kind: "setPvid", bridgePort: p.bridge, vid: p.vid })),
     ...[...memEdits.entries()].map(([vid, e]) => ({ kind: "setVlanMembership", vid, tagged: [...e.tagged], untagged: [...e.untagged] })),
     ...[...pendingLag.entries()].map(([bridge, lagId]) => ({ kind: "setLag", bridgePort: bridge, lagId })),
+    // Phase 3: a staged generic-object write rides the same path. Drop undefined snmpType/name so the
+    // engine infers the SNMP type from the MIB SYNTAX when the meta didn't carry one.
+    ...(pendingSetObject ? [pruneEdit({
+      kind: "setObject", oid: pendingSetObject.oid, value: pendingSetObject.value,
+      snmpType: pendingSetObject.snmpType, name: pendingSetObject.name,
+    })] : []),
   ];
+}
+
+// Drop keys whose value is undefined/null so the JSON edit stays minimal (engine infers them).
+function pruneEdit(e) {
+  const out = {};
+  for (const k of Object.keys(e)) if (e[k] !== undefined && e[k] !== null) out[k] = e[k];
+  return out;
+}
+
+// Total count of staged edits across all editors (grid + generic object).
+function pendingTotal() {
+  return pending.size + memEdits.size + pendingLag.size + (pendingSetObject ? 1 : 0);
 }
 
 function clearPendingState() {
   pending.clear(); memEdits.clear(); pendingLag.clear();
+  pendingSetObject = null;
   lastPlanSafety = null; blockedConfirmText = "";
 }
 
@@ -319,13 +343,14 @@ function clearPendingState() {
 // apply, the separate Save-to-startup action).
 function renderPending(msg, cls) {
   const bar = $("pending");
-  const total = pending.size + memEdits.size + pendingLag.size;
+  const total = pendingTotal();
   // The bar stays visible while there are edits, a review is open, or a save is offered.
   if (total === 0 && !msg && !lastPlanSafety && !lastApply) { bar.style.display = "none"; bar.innerHTML = ""; return; }
   const parts = [
     ...[...pending.values()].map((p) => `g${p.bridge}->VLAN ${p.vid}`),
     ...[...memEdits.keys()].map((vid) => `VLAN ${vid} members`),
     ...[...pendingLag.entries()].map(([b, lag]) => `g${b}->${lag == null ? "no LAG" : "LAG " + lag}`),
+    ...(pendingSetObject ? [`${pendingSetObject.name || pendingSetObject.oid}=${pendingSetObject.value}`] : []),
   ];
   bar.style.display = "flex";
   bar.style.flexWrap = "wrap";
@@ -478,7 +503,7 @@ function updateApplyEnabled() {
 
 // Step 1: dry-run plan to obtain the SafetyReport, then open the review panel.
 async function reviewPending() {
-  if (pending.size === 0 && memEdits.size === 0 && pendingLag.size === 0) return;
+  if (pendingTotal() === 0) return;
   const host = $("host").value.trim();
   const cred = getCred();
   if (cred.version === "v2c" && !cred.writeCommunity) { renderPending("enter a write community to apply", "bad"); return; }
@@ -839,12 +864,21 @@ const MOCK_CAPABILITIES = {
 
 let lastCaps = null; // cache so the Advanced toggle can re-render without re-fetching
 
-function capScalarTable(scalars) {
-  const rows = (scalars || []).map((s) => {
+// editable: when true (generic section + Advanced mode) each scalar gets an "Edit" affordance whose
+// click fetches object-meta and renders the type-aware widget. sectionId namespaces the row ids so
+// multiple sections coexist. Read-only objects (per the fetched MibSyntax.access) stay display-only.
+function capScalarTable(scalars, editable, sectionId) {
+  const rows = (scalars || []).map((s, i) => {
     const v = s.value === null || s.value === undefined || s.value === ""
       ? '<span class="empty">-</span>' : esc(s.value);
     const t = s.type ? ` <span class="empty">(${esc(s.type)})</span>` : "";
-    return `<tr><th title="${esc(s.oid || "")}">${esc(s.name)}</th><td class="val">${v}</td></tr>`;
+    const rid = `${sectionId || "sec"}_${i}`;
+    const act = editable
+      ? `<td class="act"><button class="editbtn" data-name="${esc(s.name || "")}" data-oid="${esc(s.oid || "")}" data-rid="${esc(rid)}">Edit</button></td>`
+      : "";
+    // A dedicated row beneath each object holds its inline editor when opened.
+    const ed = editable ? `<tr id="objed_${esc(rid)}" style="display:none"><td colspan="3"></td></tr>` : "";
+    return `<tr><th title="${esc(s.oid || "")}">${esc(s.name)}</th><td class="val">${v}${t}</td>${act}</tr>${ed}`;
   }).join("");
   return `<table class="kv-table"><tbody>${rows}</tbody></table>`;
 }
@@ -869,10 +903,13 @@ function renderCapabilities(model) {
   // Curated sections always render; generic ones only when Advanced mode is on.
   const visible = sections.filter((s) => s.kind !== "generic" || advancedMode);
 
-  const sectionHtml = visible.map((s) => {
+  const sectionHtml = visible.map((s, si) => {
     const gtag = s.kind === "generic" ? ` <span class="gtag">generic</span>` : "";
+    // Per the contract, the "Edit" affordance appears ONLY in generic sections AND only when
+    // Advanced mode is on. Curated sections stay display-only.
+    const editable = s.kind === "generic" && advancedMode;
     let inner = "";
-    if (s.scalars && s.scalars.length) inner += capScalarTable(s.scalars);
+    if (s.scalars && s.scalars.length) inner += capScalarTable(s.scalars, editable, "s" + si);
     if (s.table) inner += capDataTable(s.table);
     if (!inner) inner = '<p class="empty">no values reported</p>';
     return `<div class="capsection"><h2>${esc(s.title)}${gtag}</h2>${inner}</div>`;
@@ -903,6 +940,215 @@ function renderCapabilities(model) {
     // Keep the safety review's gating in sync if a review/apply bar is open (shared toggle).
     if (lastPlanSafety || lastApply) renderPending();
   });
+
+  // Phase 3: wire each generic-object "Edit" button to open its type-aware editor.
+  panel.querySelectorAll("button.editbtn").forEach((btn) => {
+    btn.addEventListener("click", () => openObjectEditor(btn.dataset.name, btn.dataset.oid, btn.dataset.rid, btn));
+  });
+}
+
+// ====================================================================================
+// Phase 3: type-aware object editor. Clicking "Edit" on a generic read-write object fetches its
+// MIB SYNTAX (object-meta) and renders the matching widget; "Review" stages a setObject edit and
+// runs the EXISTING plan -> Phase 2 gating -> apply flow (it is never auto-applied). The scalar's
+// instance OID is the displayed base OID with ".0" appended (scalar leaves are single-instance).
+// ====================================================================================
+
+// --- INTEGRATION FLAG ----------------------------------------------------------------
+// While the engine's describeObject() lands in parallel, set this true to resolve object-meta from
+// MOCK_SYNTAX (an enum, a ranged integer, a string) so the editor widgets can be exercised without
+// a live MIB store. SHIPPED DEFAULT IS false — use the real /api/object-meta (switch:object-meta).
+const OBJMETA_USE_MOCK = false;
+// -------------------------------------------------------------------------------------
+
+// Mock MibSyntax fixtures keyed by the object's symbol: one enum, one ranged integer, one string.
+// Matches the contract shape { base, snmpType?, enums?, range?, sizeRange?, units?, description?, access? }.
+const MOCK_SYNTAX = {
+  // enum -> <select>
+  ngFanState: {
+    base: "enum", snmpType: 2, access: "read-write",
+    enums: [{ label: "auto", value: 1 }, { label: "low", value: 2 }, { label: "high", value: 3 }],
+    description: "Desired fan-tray operating mode.",
+  },
+  // ranged integer -> bounded number input
+  ngTemperatureThreshold: {
+    base: "integer", snmpType: 2, access: "read-write",
+    range: { min: 0, max: 120 }, units: "degrees Celsius",
+    description: "Over-temperature alarm threshold.",
+  },
+  // string -> text input with maxlength from sizeRange
+  ngSystemContact: {
+    base: "string", snmpType: 4, access: "read-write",
+    sizeRange: { min: 0, max: 32 },
+    description: "Free-text administrative contact for this device.",
+  },
+};
+
+// The object currently being edited inline: { name, oid (instance), syntax, rid }. Only one editor
+// is open at a time (a fresh openObjectEditor closes any previous one).
+let openEditor = null;
+
+// The scalar's single instance OID. The capability model shows base scalar OIDs (no instance), so
+// append ".0" unless the caller already supplied an instance (ends in ".<n>" beyond the base).
+function instanceOidFor(oid) {
+  const s = String(oid || "");
+  if (!s) return s;
+  return /\.0$/.test(s) ? s : s + ".0";
+}
+
+async function fetchSyntax(name, oid) {
+  if (OBJMETA_USE_MOCK) return MOCK_SYNTAX[name] || null; // UI-dev path; flip OBJMETA_USE_MOCK above
+  try {
+    const res = await window.switchkeeper.objectMeta({ name: name || undefined, oid: oid || undefined });
+    return res && res.ok ? (res.data || null) : null;
+  } catch (e) { return null; }
+}
+
+// Build the input widget HTML for a MibSyntax. Returns { html, kind } where kind drives value reads.
+function editorWidget(syntax, currentValue) {
+  const base = (syntax && syntax.base) || "unknown";
+  if (base === "enum" || base === "boolean") {
+    const enums = (syntax.enums && syntax.enums.length)
+      ? syntax.enums
+      : (base === "boolean" ? [{ label: "true", value: 1 }, { label: "false", value: 2 }] : []);
+    if (enums.length) {
+      const opts = enums.map((e) =>
+        `<option value="${esc(e.value)}">${esc(e.label)} (${esc(e.value)})</option>`).join("");
+      return { html: `<select id="objval">${opts}</select>`, kind: "enum" };
+    }
+    // No enum list available — fall back to a free number input.
+    return { html: `<input type="number" id="objval" value="${esc(currentValue ?? "")}">`, kind: "number" };
+  }
+  if (base === "integer" || base === "unsigned" || base === "counter" || base === "timeticks") {
+    const r = syntax.range || {};
+    const lo = base === "unsigned" && r.min == null ? 0 : r.min;
+    const min = lo != null ? ` min="${esc(lo)}"` : "";
+    const max = r.max != null ? ` max="${esc(r.max)}"` : "";
+    const step = ' step="1"';
+    return { html: `<input type="number" id="objval"${min}${max}${step} value="${esc(currentValue ?? "")}">`, kind: "number" };
+  }
+  // string / oid / ipaddress / bits / unknown -> text input (sizeRange caps OCTET STRING length).
+  const sz = syntax.sizeRange || {};
+  const ml = sz.max != null ? ` maxlength="${esc(sz.max)}"` : "";
+  return { html: `<input type="text" id="objval"${ml} value="${esc(currentValue ?? "")}">`, kind: "text" };
+}
+
+// Read the editor's current value, coerced for the widget kind (number for enum/number, else string).
+function readEditorValue(kind) {
+  const el = $("objval");
+  if (!el) return undefined;
+  if (kind === "enum" || kind === "number") {
+    const n = Number(el.value);
+    return Number.isFinite(n) ? n : el.value; // leave non-numeric as-is; engine validates defensively
+  }
+  return el.value;
+}
+
+async function openObjectEditor(name, oid, rid, btn) {
+  const host = (lastCaps && lastCaps.host) || $("host").value.trim();
+  const row = $("objed_" + rid);
+  if (!row) return;
+  // Toggle: clicking Edit again on the open one closes it.
+  if (openEditor && openEditor.rid === rid && row.style.display !== "none") {
+    closeObjectEditor();
+    return;
+  }
+  if (btn) { btn.disabled = true; btn.textContent = "…"; }
+  const syntax = await fetchSyntax(name, oid);
+  if (btn) { btn.disabled = false; btn.textContent = "Edit"; }
+
+  const instanceOid = instanceOidFor(oid);
+  // Current value (for prefilling the widget) from the model row.
+  const cur = currentScalarValue(name, oid);
+
+  // Read-only / unresolved objects stay display-only (per contract). If meta is null we still allow
+  // a free-text edit only when the model itself marked it editable — but the model doesn't carry
+  // per-scalar access, so without meta we treat it as read-only to fail safe.
+  if (!syntax) {
+    row.style.display = "";
+    row.querySelector("td").innerHTML =
+      `<div class="objeditor"><div class="ename">${esc(name || instanceOid)} <span class="mono">${esc(instanceOid)}</span></div>` +
+      `<div class="ero">No MIB SYNTAX available (import this object's MIB to edit it). Read-only.</div>` +
+      `<div class="erow" style="margin-top:8px"><span class="spacer"></span><button class="editbtn" id="objClose">Close</button></div></div>`;
+    $("objClose").addEventListener("click", closeObjectEditor);
+    openEditor = { rid };
+    return;
+  }
+  if (syntax.access && syntax.access !== "read-write") {
+    row.style.display = "";
+    row.querySelector("td").innerHTML =
+      `<div class="objeditor"><div class="ename">${esc(name || instanceOid)} <span class="mono">${esc(instanceOid)}</span></div>` +
+      `<div class="ero">This object is ${esc(syntax.access)} — display only.</div>` +
+      (syntax.description ? `<div class="ehelp">${esc(syntax.description)}</div>` : "") +
+      `<div class="erow" style="margin-top:8px"><span class="spacer"></span><button class="editbtn" id="objClose">Close</button></div></div>`;
+    $("objClose").addEventListener("click", closeObjectEditor);
+    openEditor = { rid };
+    return;
+  }
+
+  const w = editorWidget(syntax, cur);
+  const units = syntax.units ? ` <b>${esc(syntax.units)}</b>` : "";
+  const help = [];
+  if (syntax.units) help.push(`Units:${units}`);
+  if (syntax.range) help.push(`Range: ${esc(syntax.range.min)}–${esc(syntax.range.max)}`);
+  if (syntax.sizeRange) help.push(`Length: ${esc(syntax.sizeRange.min)}–${esc(syntax.sizeRange.max)} chars`);
+  if (syntax.tc) help.push(`TC: ${esc(syntax.tc)}`);
+  const helpLine = help.length ? `<div class="ehelp">${help.join(" · ")}</div>` : "";
+  const descLine = syntax.description ? `<div class="ehelp">${esc(syntax.description)}</div>` : "";
+
+  row.style.display = "";
+  row.querySelector("td").innerHTML =
+    `<div class="objeditor">
+       <div class="erow">
+         <span class="ename">${esc(name || instanceOid)} <span class="mono">${esc(instanceOid)}</span></span>
+         ${w.html}
+         <span class="spacer"></span>
+         <button class="editbtn" id="objCancel">Cancel</button>
+         <button id="objReview">Review</button>
+       </div>
+       ${descLine}${helpLine}
+     </div>`;
+  openEditor = { rid, name, oid: instanceOid, syntax, kind: w.kind };
+  $("objCancel").addEventListener("click", closeObjectEditor);
+  $("objReview").addEventListener("click", reviewObjectEdit);
+}
+
+// The displayed value of a scalar from the model, used to prefill the editor.
+function currentScalarValue(name, oid) {
+  for (const s of (lastCaps?.sections || [])) {
+    for (const sc of (s.scalars || [])) {
+      if ((name && sc.name === name) || (oid && sc.oid === oid)) {
+        return sc.value == null ? "" : sc.value;
+      }
+    }
+  }
+  return "";
+}
+
+function closeObjectEditor() {
+  if (openEditor && openEditor.rid) {
+    const row = $("objed_" + openEditor.rid);
+    if (row) { row.style.display = "none"; row.querySelector("td").innerHTML = ""; }
+  }
+  openEditor = null;
+}
+
+// "Review": stage the setObject edit and hand off to the EXISTING plan -> Phase 2 gating -> apply
+// path (reviewPending). Never auto-applies — the SafetyEngine will classify the write risky/blocked
+// and the gating UI requires the matching acknowledgement before Apply enables.
+function reviewObjectEdit() {
+  if (!openEditor || !openEditor.oid) return;
+  const value = readEditorValue(openEditor.kind);
+  if (value === undefined || value === "") { setStatus("enter a value to set", "error"); return; }
+  pendingSetObject = {
+    oid: openEditor.oid,
+    value,
+    snmpType: openEditor.syntax && openEditor.syntax.snmpType,
+    name: openEditor.name || undefined,
+  };
+  closeObjectEditor();
+  renderPending();   // show the pending bar with the staged object write
+  reviewPending();   // run the dry-run plan -> safety classification -> gating UI
 }
 
 async function loadCapabilities() {

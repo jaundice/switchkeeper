@@ -18,9 +18,13 @@ export {
   editToVarbinds,
   planChanges,
   applyChangeSet,
+  readSetObjectBefore,
   type ApplyOptions,
   type VarbindSet,
 } from "./apply.ts";
+// Phase 3 generic-write spike: parse an object's SYNTAX for the type-aware editor + SET path.
+export { describeObject } from "./mibSyntax.ts";
+// Note: MibBaseType, MibEnumValue, MibSyntax are exported via `export * from "./model.ts"`.
 export { saveRunningConfig, type SaveResult } from "./save.ts";
 export { discover, discoverMany, type DiscoverOptions } from "./discover.ts";
 export { expandTargets, ipToInt, intToIp } from "./targets.ts";
@@ -33,6 +37,8 @@ export {
   classifyEdits,
   gateDecision,
   worstOf,
+  DANGEROUS_OID_PREFIXES,
+  isUnderDangerousSubtree,
   type DetectOptions,
   type Acknowledge,
 } from "./safety.ts";
@@ -60,13 +66,14 @@ export {
 import { SnmpClient } from "./snmp.ts";
 import { probe } from "./capabilities.ts";
 import { readState } from "./readState.ts";
-import { planChanges, applyChangeSet } from "./apply.ts";
+import { planChanges, applyChangeSet, readSetObjectBefore } from "./apply.ts";
 import { saveRunningConfig } from "./save.ts";
 import { readFdb, readLldpNeighbors } from "./topology.ts";
 import { localSourceMac } from "./interfaces.ts";
 import { detectProtectedSet, classifyEdits, gateDecision, type Acknowledge } from "./safety.ts";
 import { OID } from "./oids.ts";
 import { asString } from "./util.ts";
+import type { MibStore } from "./mib.ts";
 import type { ChangeSet, Credential, DeviceState, Edit, FdbEntry, LldpNeighbor } from "./model.ts";
 import type { SaveResult } from "./save.ts";
 
@@ -90,13 +97,15 @@ export async function planDevice(
   host: string,
   credential: Credential,
   edits: Edit[],
-  opts: { sourceMac?: string; mgmtVlan?: number } = {},
+  opts: { sourceMac?: string; mgmtVlan?: number; mib?: MibStore } = {},
 ): Promise<ChangeSet> {
   const client = new SnmpClient(host, credential);
   try {
     const { device, capabilities } = await probe(client, host);
     const state = await readState(client, device, capabilities);
     const cs = planChanges(state, edits);
+    // Phase 3: fill in the `before` value for any generic setObject edit via a read-only GET.
+    if (edits.some((e) => e.kind === "setObject")) await readSetObjectBefore(client, edits, cs.diff);
     // Topology reads are best-effort: a switch with no LLDP/FDB must still plan. On error we fall
     // back to empty topology, which forces detectProtectedSet down its conservative path.
     const topo = await readTopologySafe(client);
@@ -127,7 +136,7 @@ export async function applyDevice(
   host: string,
   credential: Credential,
   edits: Edit[],
-  opts: { save?: boolean; acknowledge?: Acknowledge; sourceMac?: string; mgmtVlan?: number } = {},
+  opts: { save?: boolean; acknowledge?: Acknowledge; sourceMac?: string; mgmtVlan?: number; mib?: MibStore } = {},
 ): Promise<{ changeSet: ChangeSet; save?: SaveResult; reachableAfter?: boolean }> {
   const client = new SnmpClient(host, credential);
   try {
@@ -159,8 +168,9 @@ export async function applyDevice(
       };
     }
 
-    // 2. Apply (existing verify/rollback path, unchanged).
-    const applied = await applyChangeSet(client, state, cs);
+    // 2. Apply (existing verify/rollback path, unchanged). Pass the MIB store so a generic
+    //    setObject without an explicit snmpType can infer its wire type from the SYNTAX.
+    const applied = await applyChangeSet(client, state, cs, { mib: opts.mib });
     applied.safety = safety;
 
     // 3. Post-apply reachability re-check (trivial OID: sysName). Conservative: any failure or

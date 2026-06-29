@@ -152,6 +152,49 @@ test("setPortLabel -> safe", () => {
 });
 
 // ---------------------------------------------------------------------------
+// setObject (Phase 3 generic write) — never safe; blocked under dangerous subtrees
+// ---------------------------------------------------------------------------
+
+test("setObject on a benign vendor OID -> risky (never safe)", () => {
+  // A vendor enterprise OID (1.3.6.1.4.1.1916.x = Extreme) is not in any dangerous subtree.
+  const r = only({ kind: "setObject", oid: "1.3.6.1.4.1.1916.1.1.1.10.0", value: 1 });
+  assert.equal(r.cls, "risky");
+  assert.notEqual(r.cls, "safe");
+});
+
+test("setObject on the IP subtree (1.3.6.1.2.1.4.x) -> blocked", () => {
+  // ipAdEntAddr-style OID under the IP config subtree.
+  assert.equal(only({ kind: "setObject", oid: "1.3.6.1.2.1.4.20.1.1.10.0.0.1", value: "10.0.0.2" }).cls, "blocked");
+});
+
+test("setObject on the SNMP modules subtree (1.3.6.1.6.x) -> blocked", () => {
+  // A USM user-table OID under snmpModules.
+  assert.equal(only({ kind: "setObject", oid: "1.3.6.1.6.3.15.1.2.2.1.3", value: "x" }).cls, "blocked");
+});
+
+test("setObject on the snmp group (1.3.6.1.2.1.11.x) -> blocked", () => {
+  assert.equal(only({ kind: "setObject", oid: "1.3.6.1.2.1.11.30.0", value: 1 }).cls, "blocked");
+});
+
+test("setObject on ifAdminStatus (1.3.6.1.2.1.2.2.1.7.x) -> blocked", () => {
+  assert.equal(only({ kind: "setObject", oid: "1.3.6.1.2.1.2.2.1.7.5", value: 2 }).cls, "blocked");
+});
+
+test("setObject never classifies as safe even on a deep benign OID", () => {
+  const r = classifyEdits(
+    [{ kind: "setObject", oid: "1.3.6.1.4.1.4526.10.1.1.1.1.0", value: 7, name: "ngVendorThing" }],
+    state(),
+    pset(),
+  );
+  assert.notEqual(r.classifications[0].cls, "safe");
+});
+
+test("setObject: a sibling of a dangerous prefix is NOT mis-blocked (1.3.6.1.2.1.40)", () => {
+  // 1.3.6.1.2.1.40 must not match the 1.3.6.1.2.1.4 prefix (subtree boundary on the dot).
+  assert.equal(only({ kind: "setObject", oid: "1.3.6.1.2.1.40.1.0", value: 1 }).cls, "risky");
+});
+
+// ---------------------------------------------------------------------------
 // worst aggregation
 // ---------------------------------------------------------------------------
 

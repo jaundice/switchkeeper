@@ -23,6 +23,47 @@ import type {
 // uplink/trunk (the management path likely traverses it), not an edge access port.
 const UPLINK_FDB_MAC_THRESHOLD = 4;
 
+// ---------------------------------------------------------------------------
+// Phase 3: generic-write danger list (auditable, extensible)
+// ---------------------------------------------------------------------------
+// A generic setObject is NEVER "safe". It is "blocked" when its target OID falls under any of these
+// subtrees — the standard SNMP/IP/credential management trees where a write can silently strand the
+// device or change how it is administered/secured. Each entry is a DOTTED OID PREFIX (matched as a
+// subtree: exact OID or any OID that begins with "<prefix>."). Kept here as a clearly-commented
+// const so it is auditable in one place and easy to extend per deployment.
+//
+// NOTE: prefixes intentionally end WITHOUT a trailing dot; isUnderDangerousSubtree appends one so
+// "1.3.6.1.2.1.4" matches "1.3.6.1.2.1.4.20.1.1" but NOT a sibling like "1.3.6.1.2.1.40".
+export const DANGEROUS_OID_PREFIXES: { prefix: string; why: string }[] = [
+  // IP layer (RFC 4293 ip / RFC 1213 ip): addresses, routes, ARP — changing these can drop the
+  // management path or repoint the device's own IP.
+  { prefix: "1.3.6.1.2.1.4", why: "IP configuration (addresses, routing, ARP)" },
+  // SNMP protocol stats/control (RFC 3418 snmp group).
+  { prefix: "1.3.6.1.2.1.11", why: "SNMP protocol group (snmp)" },
+  // The whole snmpModules subtree: SNMP engine + framework + the credential/admin tables below.
+  { prefix: "1.3.6.1.6", why: "SNMP modules (engine/admin/security/notification)" },
+  // Explicit credential/admin tables under snmpModules — listed individually so an audit reads
+  // exactly which security surfaces are off-limits, even though 1.3.6.1.6 already covers them:
+  { prefix: "1.3.6.1.6.3.10", why: "SNMP-FRAMEWORK-MIB (snmpEngine)" },
+  { prefix: "1.3.6.1.6.3.11", why: "SNMP-MPD-MIB" },
+  { prefix: "1.3.6.1.6.3.12", why: "SNMP-TARGET-MIB (target addresses)" },
+  { prefix: "1.3.6.1.6.3.13", why: "SNMP-NOTIFICATION-MIB" },
+  { prefix: "1.3.6.1.6.3.15", why: "SNMP-USER-BASED-SM-MIB (USM users/keys)" },
+  { prefix: "1.3.6.1.6.3.16", why: "SNMP-VIEW-BASED-ACM-MIB (VACM access control)" },
+  { prefix: "1.3.6.1.6.3.18", why: "SNMP-COMMUNITY-MIB (v1/v2c communities)" },
+  // System control that can drop the link / reboot (sysName is fine to read; these are write traps):
+  // ifAdminStatus column — a generic write here could disable an interface out from under us.
+  { prefix: "1.3.6.1.2.1.2.2.1.7", why: "ifAdminStatus (interface enable/disable)" },
+];
+
+/** True if `oid` is at or under any dangerous subtree. Subtree match: exact, or prefixed by "<p>.". */
+export function isUnderDangerousSubtree(oid: string): { blocked: boolean; why?: string } {
+  for (const { prefix, why } of DANGEROUS_OID_PREFIXES) {
+    if (oid === prefix || oid.startsWith(prefix + ".")) return { blocked: true, why };
+  }
+  return { blocked: false };
+}
+
 export interface DetectOptions {
   /** MAC of the station the app talks from, if known — lets us pin the exact mgmt access port. */
   sourceMac?: string;
@@ -279,6 +320,19 @@ function classifyOne(
 
     case "setPortLabel":
       return cls(edit, "safe", `relabels port (ifIndex ${edit.ifIndex})`);
+
+    case "setObject": {
+      // A generic write to an arbitrary vendor object is NEVER "safe" (contract): we can't reason
+      // about its effect the way we can for the curated edits above. Blocked if it targets a known
+      // dangerous subtree (IP/SNMP/credential/admin), otherwise risky — which forces an explicit
+      // acknowledgement through the same Phase 2 gate as any other risky edit.
+      const danger = isUnderDangerousSubtree(edit.oid);
+      const what = edit.name ? `${edit.name} (${edit.oid})` : edit.oid;
+      if (danger.blocked) {
+        return cls(edit, "blocked", `writes ${what} in a protected subtree: ${danger.why}`);
+      }
+      return cls(edit, "risky", `generic write to ${what} — effect not curated, proceed with care`);
+    }
   }
 }
 

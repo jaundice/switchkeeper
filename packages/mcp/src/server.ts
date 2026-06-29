@@ -25,6 +25,7 @@ import {
   readTopology,
   createMibStore,
   readDeviceCapabilities,
+  describeObject,
 } from "../../engine/src/index.ts";
 import type { Credential, Edit, CapabilityModel } from "../../engine/src/index.ts";
 
@@ -127,6 +128,34 @@ function buildServer(): McpServer {
     },
   }, async ({ host, edits, writeCommunity, community, save, acknowledge }) =>
     ok(await applyDevice(host, v2c(community, writeCommunity), edits as Edit[], { save: !!save, acknowledge })));
+  server.registerTool("switch_set_object", {
+    // Phase 3: SET an arbitrary writable vendor object. The edit is built as a single
+    // { kind:"setObject" } and handed to applyDevice, so it goes through the SAME Phase 2 safety
+    // gate as every other write: a generic write is never classified `safe` (always at least
+    // `risky`), and writes into IP/SNMP/credential subtrees are `blocked`. The engine refuses
+    // risky/blocked edits unless explicitly acknowledged — pass acknowledge:{allowRisky:true}
+    // (and acknowledge:{allowBlocked:true} for connectivity-/admin-sensitive subtrees). Run
+    // switch_plan first to see the classification (changeSet.safety). Nothing auto-saves.
+    description: "Set a single writable vendor object by OID (e.g. a scalar's .0 instance). The write is " +
+      "safety-gated exactly like other edits: it is never classified safe (at least risky), and IP/SNMP/" +
+      "admin subtrees are blocked — risky/blocked require explicit acknowledgement: pass " +
+      "acknowledge:{allowRisky:true} for risky and acknowledge:{allowBlocked:true} for blocked, else the " +
+      "engine refuses and sends no SET. value is the new value (number for integer/enum/unsigned, string " +
+      "for OCTET STRING/OID/IpAddress); snmpType is optional (inferred from the MIB SYNTAX if omitted).",
+    inputSchema: {
+      host: z.string(),
+      writeCommunity: z.string(),
+      oid: z.string().describe("fully-qualified instance OID to set, e.g. a scalar's .0"),
+      value: z.union([z.string(), z.number()]),
+      snmpType: z.number().optional(),
+      name: z.string().optional().describe("symbol name, for display/audit"),
+      community: z.string().optional(),
+      acknowledge: z.object({ allowRisky: z.boolean().optional(), allowBlocked: z.boolean().optional() }).optional(),
+    },
+  }, async ({ host, writeCommunity, oid, value, snmpType, name, community, acknowledge }) => {
+    const edit: Edit = { kind: "setObject", oid, value, snmpType, name };
+    return ok(await applyDevice(host, v2c(community, writeCommunity), [edit], { save: false, acknowledge }));
+  });
   server.registerTool("switch_save", {
     description: "Persist running config to startup (vendor-specific; may be unsupported on some models).",
     inputSchema: { host: z.string(), writeCommunity: z.string(), community: z.string().optional() },
@@ -219,6 +248,18 @@ if (httpIdx >= 0) {
       return { ok: true, data, indexing: true };
     }
     return { ok: true, data: await readDeviceCapabilities(b.host, credFromWeb(b.cred), store) };
+  }));
+  // Phase 3: editor metadata for one object. The renderer calls this (Advanced mode) to learn an
+  // object's SYNTAX (base type, enums, ranges, units, description, access) so it can build the
+  // right edit widget. No device is needed — it reads the shared MIB store only. While the store is
+  // still building (cache cold), mibStore() is null: return data:null so the UI falls back to a
+  // free-text editor rather than failing.
+  app.post("/api/object-meta", wrap(async (b) => {
+    const store = mibStore();
+    if (!store) return { ok: true, data: null };
+    const key = b.name || b.oid;
+    if (!key) return { ok: true, data: null };
+    return { ok: true, data: describeObject(store, String(key)) };
   }));
   app.get("/api/mib-status", (_req, res) => {
     const s = mibStore(); // null while a background build is in progress

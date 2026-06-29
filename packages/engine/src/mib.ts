@@ -116,6 +116,16 @@ export interface MibStore {
   loadedModules(): string[];
   /** Module names known from indexing (loaded or not). */
   indexedModules(): string[];
+  /**
+   * Phase 3 spike support: expose an object's defining module + source-file text so the SYNTAX
+   * parser (mibSyntax.ts) can read its OBJECT-TYPE block. Resolves `symbolOrOid` to its defining
+   * object (via findOid for a symbol, or a reverse OID scan for a numeric OID), then returns the
+   * raw MIB text of that module's file from the moduleName->file index. Bounded: it only reads the
+   * ONE file that defines the object (no recursive import-closure reads). Null if unresolvable.
+   */
+  sourceFor(symbolOrOid: string): { module: string; file: string; text: string; object: MibObject } | null;
+  /** Raw MIB text for an indexed module (used to follow a named TEXTUAL-CONVENTION into its file). */
+  moduleText(module: string): string | null;
 }
 
 export function createMibStore(): MibStore {
@@ -444,6 +454,45 @@ export function createMibStore(): MibStore {
       }));
   }
 
+  // Read an indexed module's raw MIB text (latin1, matching how the store reads files). Used by
+  // the Phase 3 SYNTAX parser to extract OBJECT-TYPE blocks and to follow a named TC into its file.
+  function moduleText(module: string): string | null {
+    const f = index.get(module);
+    if (!f) return null;
+    try { return readFileSync(f, "latin1"); } catch { return null; }
+  }
+
+  // Resolve a symbol or numeric OID to its defining MibObject. Symbols use the existing symCache;
+  // numeric OIDs are matched against `resolved` (the distilled module->objects map), accepting an
+  // exact object-OID match or an instance OID (object OID + a trailing ".N" suffix, e.g. a scalar's
+  // ".0"). The longest matching object OID wins so we pick the most specific object.
+  function objectFor(symbolOrOid: string): MibObject | null {
+    if (symDirty) buildSymCache();
+    const direct = symCache.get(symbolOrOid);
+    if (direct) return direct;
+    if (!/^[0-9]+(\.[0-9]+)*$/.test(symbolOrOid)) return null; // not a numeric OID
+    let best: MibObject | null = null;
+    for (const list of resolved.values()) {
+      for (const o of list) {
+        if (!o.oid) continue;
+        if (o.oid === symbolOrOid || symbolOrOid.startsWith(o.oid + ".")) {
+          if (!best || o.oid.length > best.oid.length) best = o;
+        }
+      }
+    }
+    return best;
+  }
+
+  function sourceFor(symbolOrOid: string): { module: string; file: string; text: string; object: MibObject } | null {
+    const obj = objectFor(symbolOrOid);
+    if (!obj) return null;
+    const file = index.get(obj.module);
+    if (!file) return null; // module wasn't indexed from a file (e.g. a net-snmp base module)
+    const text = moduleText(obj.module);
+    if (text === null) return null;
+    return { module: obj.module, file, text, object: obj };
+  }
+
   return {
     indexDir,
     loadFile,
@@ -455,5 +504,7 @@ export function createMibStore(): MibStore {
     findOid: (symbol: string) => { if (symDirty) buildSymCache(); return symCache.get(symbol) || null; },
     loadedModules: () => [...new Set<string>([...resolved.keys(), ...registered])],
     indexedModules: () => indexedNames ?? [...index.keys()],
+    sourceFor,
+    moduleText,
   };
 }

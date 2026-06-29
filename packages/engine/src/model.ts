@@ -129,7 +129,12 @@ export type Edit =
   | { kind: "setPoe"; bridgePort: number; on: boolean }
   | { kind: "setLag"; bridgePort: number; lagId: number | null }
   | { kind: "createVlan"; vid: number; name?: string }
-  | { kind: "deleteVlan"; vid: number };
+  | { kind: "deleteVlan"; vid: number }
+  // Phase 3 generic write: SET an arbitrary writable vendor object. `oid` is the
+  // FULLY-QUALIFIED instance OID (e.g. a scalar's ".0"); `name` is optional (the symbol,
+  // for display/audit); `snmpType` is the net-snmp ObjectType code — if omitted, the apply
+  // path infers it from the resolved MibSyntax. This kind is NEVER classified "safe".
+  | { kind: "setObject"; oid: string; value: string | number; snmpType?: number; name?: string };
 
 export interface DiffEntry {
   edit: Edit;
@@ -233,6 +238,30 @@ export interface FdbEntry {
 
 /** SNMP MAX-ACCESS, normalised. "unknown" when the MIB didn't state one. */
 export type ObjectAccess = "read-only" | "read-write" | "not-accessible" | "unknown";
+
+// ---- Phase 3: MIB SYNTAX description (drives type-aware editors + generic SET varbinds) ----
+// Shapes pinned by docs/specs/phase3-contract.md. The engine parses these from MIB text
+// (net-snmp's store exposes only base type + maxAccess, not enums/ranges/TC/DESCRIPTION).
+
+/** Normalised SYNTAX category that picks the editor widget. */
+export type MibBaseType =
+  | "integer" | "unsigned" | "enum" | "boolean" | "string" | "oid"
+  | "ipaddress" | "counter" | "timeticks" | "bits" | "unknown";
+
+export interface MibEnumValue { label: string; value: number }
+
+/** Editor-oriented description of one object's SYNTAX, parsed from the MIB text. */
+export interface MibSyntax {
+  base: MibBaseType;                        // normalized category that picks the editor widget
+  snmpType?: number;                        // net-snmp ObjectType code, for building the SET varbind
+  enums?: MibEnumValue[];                   // for base "enum"/"boolean"
+  range?: { min: number; max: number };     // INTEGER value range, if constrained
+  sizeRange?: { min: number; max: number }; // OCTET STRING length range, if constrained
+  tc?: string;                              // textual-convention name, if the SYNTAX referenced one
+  units?: string;                          // UNITS clause, if present
+  description?: string;                    // DESCRIPTION text (trimmed)
+  access?: ObjectAccess;                   // MAX-ACCESS (read-write/read-create are editable)
+}
 
 /**
  * A symbol resolved to an OID + metadata, carrying its provenance so the UI knows

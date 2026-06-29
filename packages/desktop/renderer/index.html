@@ -163,6 +163,22 @@
       .safety .savehint { color: var(--muted); font-size: 12px; }
       .pending .danger { background: var(--red); color: #190606; }
       .pending button.savestartup { background: var(--green); color: #06140a; }
+      /* --- Phase 3: per-object "Edit" affordance + type-aware editor (Advanced mode only) --- */
+      table.kv-table td.act { width: 1%; white-space: nowrap; text-align: right; }
+      button.editbtn { background: none; border: 1px solid var(--line); color: var(--accent);
+        border-radius: 5px; padding: 1px 9px; font: inherit; font-size: 12px; cursor: pointer; }
+      button.editbtn:hover { border-color: var(--accent); }
+      .objeditor { margin-top: 6px; padding: 10px 12px; border: 1px solid var(--amber);
+        border-radius: 8px; background: rgba(210,153,34,.06); }
+      .objeditor .erow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+      .objeditor .ename { font-weight: 600; } .objeditor .ename .mono { color: var(--muted); font-weight: 400; }
+      .objeditor select, .objeditor input[type=text], .objeditor input[type=number] {
+        background: var(--panel2); border: 1px solid var(--line); color: var(--text);
+        border-radius: 5px; padding: 4px 7px; font: inherit; }
+      .objeditor .ehelp { color: var(--muted); font-size: 12px; margin-top: 5px; }
+      .objeditor .ehelp b { color: var(--text); font-weight: 600; }
+      .objeditor .ero { color: var(--amber); font-size: 12px; margin-top: 5px; }
+      .objeditor .spacer { flex: 1; }
     </style>
   </head>
   <body>

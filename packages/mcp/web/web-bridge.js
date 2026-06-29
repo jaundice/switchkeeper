@@ -24,6 +24,9 @@
     save: (req) => post("/api/save", req),
     topology: (req) => post("/api/topology", req),
     capabilities: (req) => post("/api/capabilities", req),
+    // Phase 3: fetch one object's MIB SYNTAX ({name?,oid?}) so the renderer can build a type-aware
+    // edit widget. Returns { ok, data: MibSyntax|null } (null while the MIB store is still building).
+    objectMeta: (req) => post("/api/object-meta", req),
     interfaces: async () => {
       try {
         return await (await fetch("/api/interfaces")).json();
