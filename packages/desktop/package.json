@@ -1,6 +1,6 @@
 {
   "name": "@switchkeeper/desktop",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "private": true,
   "description": "Switchkeeper Electron desktop app (self-contained; engine bundled in-process)",
   "homepage": "https://github.com/jaundice/switchkeeper#readme",
@@ -14,7 +14,7 @@
   "license": "MIT",
   "main": "main.cjs",
   "scripts": {
-    "build:engine": "esbuild ../engine/src/index.ts --bundle --platform=node --format=cjs --outfile=build/engine.cjs",
+    "build:engine": "esbuild ../engine/src/index.ts --bundle --platform=node --format=cjs --outfile=build/engine.cjs && node scripts/copy-base-mibs.cjs",
     "start": "npm run build:engine && electron .",
     "dist": "npm run build:engine && electron-builder --publish never"
   },
@@ -29,6 +29,7 @@
     "electronVersion": "33.4.11",
     "npmRebuild": false,
     "files": ["main.cjs", "preload.cjs", "renderer/**/*", "build/**/*"],
+    "asarUnpack": ["build/lib/mibs/**"],
     "extraResources": [{ "from": "../mcp/mibs-std", "to": "mibs-std" }],
     "directories": { "output": "release" },
     "win": { "target": "nsis" },

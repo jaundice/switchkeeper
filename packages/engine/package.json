@@ -1,6 +1,6 @@
 {
   "name": "@switchkeeper/engine",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Switchkeeper core engine: data model, SNMP/NSDP transport, vendor profiles, safe transactional writes.",
   "keywords": ["snmp", "switch", "vlan", "poe", "802.1q", "q-bridge", "networking"],
   "homepage": "https://github.com/jaundice/switchkeeper#readme",

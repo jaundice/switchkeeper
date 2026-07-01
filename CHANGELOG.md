@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-07-01
+
+### Fixed
+
+- **MIB import in the packaged desktop app**: importing a vendor MIB failed with
+  `ENOENT ... build/lib/mibs/RFC1155-SMI.mib` whenever the MIB imported a base module. net-snmp
+  loads its base MIBs at runtime from `__dirname/lib/mibs/*.mib`, but esbuild bundles net-snmp into
+  `build/engine.cjs` without those data files, so the lookup missed inside `app.asar`. The desktop
+  build now copies net-snmp's base `.mib` files into `build/lib/mibs/` (and unpacks them from the
+  asar), so `Import MIB…` resolves standard imports. The MCP server was unaffected (it runs net-snmp
+  unbundled from `node_modules`).
+
 ## [0.4.3] - 2026-06-29
 
 ### Fixed
