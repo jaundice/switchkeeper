@@ -39,6 +39,16 @@ export async function probe(
       asBuffer(vb.value).some((b) => b !== 0),
     );
     membershipSource = anyNonEmpty ? "current" : "static";
+    // Some agents (observed: Extreme EXOS / Switch Engine) never populate the volatile "current"
+    // egress table but DO expose the "static" config table. If current is empty, probe static so
+    // VLAN port membership is still readable (membershipSource flips to "static").
+    if (!qbridgeRead) {
+      const st = await client.column(OID.dot1qVlanStaticEgressPorts);
+      if (st.size > 0) {
+        qbridgeRead = true;
+        membershipSource = "static";
+      }
+    }
   } catch { /* qbridge may be absent */ }
 
   // PoE: present if the peth admin column answers.

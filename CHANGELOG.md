@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-07-03
+
+### Fixed
+
+- **VLAN port membership on EXOS-style agents**: switches that leave the volatile Q-BRIDGE "current"
+  egress/untagged tables empty (observed: Extreme EXOS X440 / Switch Engine) showed VLANs with no
+  tagged/untagged members. The capability probe now falls back to the "static" config tables
+  (`dot1qVlanStaticEgressPorts` / `dot1qVlanStaticUntaggedPorts`, indexed directly by VID) when
+  "current" is empty — flipping `qbridgeRead` on and `membershipSource` to `static` — and `readState`
+  reads membership from those static tables, so per-port tagged/untagged VLANs populate correctly.
+
 ## [0.4.4] - 2026-07-01
 
 ### Fixed

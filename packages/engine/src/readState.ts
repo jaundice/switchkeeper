@@ -47,14 +47,23 @@ export async function readState(
     ]);
   }
 
-  // --- VLANs: names + live membership from the current table ---
+  // --- VLANs: names + port membership. Prefer the live "current" table; fall back to the "static"
+  //     config table for agents (e.g. Extreme EXOS) that leave "current" empty. ---
   const vlanNames = await client.column(OID.dot1qVlanStaticName);
-  const curEgress = caps.qbridgeRead ? await client.column(OID.dot1qVlanCurrentEgressPorts) : new Map();
-  const curUntagged = caps.qbridgeRead ? await client.column(OID.dot1qVlanCurrentUntaggedPorts) : new Map();
-
-  // current-table index is "<timeMark>.<vid>"; reduce to vid -> bitmap
-  const egressByVid = lastByVid(curEgress);
-  const untaggedByVid = lastByVid(curUntagged);
+  let egressByVid = new Map<number, Uint8Array>();
+  let untaggedByVid = new Map<number, Uint8Array>();
+  // current-table index is "<timeMark>.<vid>"; static-table index is "<vid>" directly.
+  if (caps.qbridgeRead && caps.membershipSource !== "static") {
+    egressByVid = lastByVid(await client.column(OID.dot1qVlanCurrentEgressPorts));
+    untaggedByVid = lastByVid(await client.column(OID.dot1qVlanCurrentUntaggedPorts));
+  }
+  if (egressByVid.size === 0) {
+    const stEgress = await client.column(OID.dot1qVlanStaticEgressPorts);
+    if (stEgress.size > 0) {
+      egressByVid = byVid(stEgress);
+      untaggedByVid = byVid(await client.column(OID.dot1qVlanStaticUntaggedPorts));
+    }
+  }
 
   const vlans: Vlan[] = [];
   const taggedByBridgePort = new Map<number, Set<number>>();
@@ -170,6 +179,13 @@ function lastByVid(col: Map<string, any>): Map<number, Uint8Array> {
     const vid = Number(parts[parts.length - 1]);
     out.set(vid, asBuffer(vb.value));
   }
+  return out;
+}
+
+/** Static-table rows are indexed by "<vid>" directly. */
+function byVid(col: Map<string, any>): Map<number, Uint8Array> {
+  const out = new Map<number, Uint8Array>();
+  for (const [idx, vb] of col) out.set(Number(idx), asBuffer(vb.value));
   return out;
 }
 
