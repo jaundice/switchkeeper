@@ -225,6 +225,28 @@
       .history .hitem .tag.blocked { background: rgba(248,81,73,.18); color: var(--red); }
       .history .hitem .hlabel { color: var(--text); }
       .history .hitem .hdiff { color: var(--muted); } .history .hitem .hdiff b { color: var(--text); }
+      /* --- VLAN structural editing (add / delete / rename) — Advanced mode only --- */
+      .vlanhead { display: flex; align-items: center; gap: 12px; }
+      .vlanhead h2 { margin: 22px 0 8px; }
+      .vlanhead .advtoggle { margin-left: auto; }
+      .vlanadd { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 8px;
+        padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+      .vlanadd input.vlanvid { width: 130px; } .vlanadd input.vlanname { width: 180px; }
+      .vlanerr { color: var(--red); font-size: 12px; }
+      /* Delete-staged rows read as struck-through/dimmed; new (pending-create) rows tint accent. */
+      tr.vlandel td { text-decoration: line-through; color: var(--muted); opacity: .7; }
+      tr.vlannew td { background: rgba(79,156,249,.08); }
+      td.vlact { white-space: nowrap; }
+      td.vlact button { margin-right: 5px; }
+      button.vldel { color: var(--red); border-color: rgba(248,81,73,.4); }
+      button.vldel:hover { border-color: var(--red); }
+      button.vlundo { background: none; border: 1px solid var(--line); color: var(--muted);
+        border-radius: 5px; padding: 1px 9px; font: inherit; font-size: 12px; cursor: pointer; }
+      button.vlundo:hover { border-color: var(--accent); color: var(--text); }
+      button.vlrenok { padding: 1px 9px; font-size: 12px; }
+      input.vlanname, input.vlanvid, input.vlrenin { background: var(--panel2); border: 1px solid var(--line);
+        color: var(--text); border-radius: 5px; padding: 4px 7px; font: inherit; }
+      input.vlrenin { width: 150px; margin-right: 5px; }
     </style>
   </head>
   <body>

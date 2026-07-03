@@ -303,6 +303,19 @@ function classifyOne(
       return cls(edit, "risky", `deletes VLAN ${edit.vid} (member ports lose it)`);
     }
 
+    case "renameVlan": {
+      // A rename is a plain name SET on an existing row — it never severs the path, so it is
+      // never blocked. Uncertain (VLAN absent from state) or the management VLAN -> risky.
+      const v = state.vlans.find((x) => x.vid === edit.vid);
+      if (!v) {
+        return cls(edit, "risky", `VLAN ${edit.vid} not found in state — rename effect uncertain`);
+      }
+      if (V.has(edit.vid)) {
+        return cls(edit, "risky", `renames the management VLAN ${edit.vid}`);
+      }
+      return cls(edit, "safe", `renames VLAN ${edit.vid} to "${edit.name}"`);
+    }
+
     case "setLag": {
       if (P.has(edit.bridgePort)) {
         return cls(edit, "risky", `changes LAG membership of management port ${edit.bridgePort}`);

@@ -8,6 +8,12 @@ let lastState = null;
 const pending = new Map(); // bridgePort -> { bridge, vid, orig }   (PVID edits)
 const memEdits = new Map(); // vid -> { tagged:Set, untagged:Set }  (membership edits)
 const pendingLag = new Map(); // bridgePort -> lagId|null            (LAG edits)
+// VLAN structural edits (add/delete/rename), Advanced-mode only. Keyed by vid so at most one
+// structural change is staged per VLAN. Each value is the engine Edit itself, so collectEdits()
+// can emit them verbatim onto the SAME plan/apply path the grid uses (the SafetyEngine then
+// classifies e.g. a management-VLAN delete as blocked). Shapes:
+//   { kind:"createVlan", vid, name }  { kind:"deleteVlan", vid }  { kind:"renameVlan", vid, name }
+const vlanStructEdits = new Map(); // vid -> engine Edit (createVlan | deleteVlan | renameVlan)
 // Phase 3: at most one generic-object write is staged at a time. Shape mirrors the engine Edit:
 // { kind:"setObject", oid, value, snmpType?, name? }. It rides the SAME review/gating/apply path
 // as the grid edits (collectEdits includes it; the SafetyEngine classifies it risky/blocked).
@@ -83,6 +89,7 @@ function editLabel(e) {
     case "setLag": return e.lagId == null ? `Remove port ${e.bridgePort} from LAG` : `Add port ${e.bridgePort} to LAG ${e.lagId}`;
     case "createVlan": return `Create VLAN ${e.vid}${e.name ? ` (${e.name})` : ""}`;
     case "deleteVlan": return `Delete VLAN ${e.vid}`;
+    case "renameVlan": return `Rename VLAN ${e.vid} to "${e.name}"`;
     case "setObject": return `Set ${e.name ? e.name : e.oid} = ${e.value}`;
     default: return e.kind;
   }
@@ -158,14 +165,75 @@ async function populateMibRow(d) {
 }
 
 function vlanTable(vlans) {
-  const rows = vlans.map((v) => {
+  // Structural edits are Advanced-mode only (same gating pattern as the Details/generic controls):
+  // in Simple mode the VLANs table stays read-only. `adv` decides whether we render the add row,
+  // the per-row delete/rename affordances, and the extra "actions" column.
+  const adv = advancedMode;
+
+  // Pending create edits don't exist in lastState.vlans yet — surface them as extra rows so the
+  // operator sees the VLAN they staged before Review/apply lands it.
+  const creates = [...vlanStructEdits.values()].filter((e) => e.kind === "createVlan");
+  const createVids = new Set(creates.map((e) => e.vid));
+
+  const realRows = vlans.map((v) => {
+    const struct = vlanStructEdits.get(v.vid);
+    const pendingDelete = struct && struct.kind === "deleteVlan";
+    const pendingRename = struct && struct.kind === "renameVlan";
     const u = v.members.untagged.map((p) => `<span class="chip untag">${p}</span>`).join("") || '<span class="empty">-</span>';
     const t = v.members.tagged.map((p) => `<span class="chip tag">${p}</span>`).join("") || '<span class="empty">-</span>';
-    return `<tr><td class="num">${v.vid}</td><td>${esc(v.name || "")}</td><td>${u}</td><td>${t}</td></tr>`;
+    // Name cell reflects a staged rename (shown as the new value) so the pending change is visible.
+    const nameShown = pendingRename ? struct.name : (v.name || "");
+    const nameCell = `<span class="vlname">${esc(nameShown)}</span>${pendingRename ? ' <span class="empty">(rename pending)</span>' : ""}`;
+    const act = adv ? vlanRowActions(v.vid, !!pendingDelete, !!pendingRename) : "";
+    return `<tr class="vlanrow${pendingDelete ? " vlandel" : ""}" data-vid="${v.vid}">
+      <td class="num">${v.vid}</td><td>${nameCell}</td><td>${u}</td><td>${t}</td>${act}</tr>`;
   }).join("");
-  return `<h2>VLANs (${vlans.length})</h2>
-    <div class="scrollwrap"><table><thead><tr><th>VID</th><th>Name</th><th>Untagged ports</th><th>Tagged ports</th></tr></thead>
-    <tbody>${rows}</tbody></table></div>`;
+
+  // Rows for VLANs staged for creation (not yet on the device). Shown pending, with a Cancel action.
+  const createRows = adv ? creates.map((e) => `
+    <tr class="vlanrow vlannew" data-vid="${e.vid}">
+      <td class="num">${e.vid}</td>
+      <td><span class="vlname">${esc(e.name || "")}</span> <span class="empty">(new — pending)</span></td>
+      <td><span class="empty">-</span></td><td><span class="empty">-</span></td>
+      <td class="vlact"><button class="vlundo" data-vid="${e.vid}" title="Cancel this staged VLAN">Cancel</button></td>
+    </tr>`).join("") : "";
+
+  const head = `<tr><th>VID</th><th>Name</th><th>Untagged ports</th><th>Tagged ports</th>${adv ? "<th>Actions</th>" : ""}</tr>`;
+  const count = vlans.length + (adv ? createVids.size : 0);
+  return `<div class="vlanhead">
+      <h2>VLANs (${count})</h2>
+      <label class="${adv ? "advtoggle on" : "advtoggle"}" title="Advanced mode enables adding, deleting and renaming VLANs (changes still go through Review before anything is applied)">
+        <input type="checkbox" id="vlanAdvChk" ${adv ? "checked" : ""}> Advanced mode
+      </label>
+    </div>
+    ${adv ? vlanAddRow() : ""}
+    <div class="scrollwrap"><table><thead>${head}</thead>
+    <tbody>${realRows}${createRows}</tbody></table></div>`;
+}
+
+// Per-row Delete / Rename affordances (Advanced mode). A delete-staged row offers Undo instead of
+// Delete; a rename-staged row still lets the operator re-edit or Undo. Data-vid links back to state.
+function vlanRowActions(vid, pendingDelete, pendingRename) {
+  const staged = pendingDelete || pendingRename;
+  const del = pendingDelete
+    ? `<button class="vlundo" data-vid="${vid}" title="Cancel the staged delete">Undo delete</button>`
+    : `<button class="editbtn vldel" data-vid="${vid}" title="Stage this VLAN for deletion">Delete</button>`;
+  const ren = `<button class="editbtn vlren" data-vid="${vid}" title="Rename this VLAN">Rename</button>`;
+  const undoRen = pendingRename
+    ? ` <button class="vlundo" data-vid="${vid}" title="Cancel the staged rename">Undo rename</button>` : "";
+  // While a delete is staged, hide Rename (renaming a doomed VLAN is meaningless).
+  return `<td class="vlact">${pendingDelete ? del : `${ren}${undoRen} ${del}`}<span class="vlinline" data-vid="${vid}"></span></td>`;
+}
+
+// The "New VLAN" control row: VID number input, optional name, Add button, and an inline error slot.
+function vlanAddRow() {
+  return `<div class="vlanadd">
+      <span class="empty">New VLAN:</span>
+      <input id="newVlanVid" type="number" min="1" max="4094" step="1" placeholder="VID (1-4094)" class="vlanvid">
+      <input id="newVlanName" type="text" placeholder="name (optional)" class="vlanname" maxlength="32">
+      <button id="addVlanBtn" title="Stage a new VLAN (goes through Review before it is applied)">Add VLAN</button>
+      <span id="addVlanErr" class="vlanerr"></span>
+    </div>`;
 }
 
 function vlanName(vid) {
@@ -309,6 +377,104 @@ function renderAll() {
       renderPending();
     });
   });
+  wireVlanStructControls();
+}
+
+// Wire the Advanced-mode VLAN structural controls (add row, per-row delete/rename/undo, and the
+// section's own Advanced toggle). All of these only exist in the DOM when advancedMode is on, except
+// the toggle itself which is always present so the operator can flip modes from the VLANs section.
+function wireVlanStructControls() {
+  // Section-local Advanced toggle: mirrors the Details/review toggles (shared advancedMode state).
+  const advChk = $("vlanAdvChk");
+  if (advChk) advChk.addEventListener("change", () => {
+    advancedMode = advChk.checked;
+    renderAll();                                   // re-render VLANs + ports for the new mode
+    if (lastCaps) renderCapabilities(lastCaps);    // keep the Details panel toggle in sync
+    if (lastPlanSafety || lastApply) renderPending(); // keep any open review's gating in sync
+    renderPending();
+  });
+
+  // Add VLAN: validate then stage a createVlan edit.
+  const addBtn = $("addVlanBtn");
+  if (addBtn) addBtn.addEventListener("click", stageCreateVlan);
+  const vidInput = $("newVlanVid");
+  if (vidInput) vidInput.addEventListener("keydown", (e) => { if (e.key === "Enter") stageCreateVlan(); });
+  const nameInput = $("newVlanName");
+  if (nameInput) nameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") stageCreateVlan(); });
+
+  // Per-row Delete: stage a deleteVlan for the row's vid.
+  document.querySelectorAll("button.vldel").forEach((b) => {
+    b.addEventListener("click", () => stageDeleteVlan(Number(b.dataset.vid)));
+  });
+  // Per-row Rename: open an inline name input for the row's vid.
+  document.querySelectorAll("button.vlren").forEach((b) => {
+    b.addEventListener("click", () => openVlanRename(Number(b.dataset.vid), b));
+  });
+  // Undo/Cancel a staged structural edit for the row's vid.
+  document.querySelectorAll("button.vlundo").forEach((b) => {
+    b.addEventListener("click", () => { vlanStructEdits.delete(Number(b.dataset.vid)); renderAll(); renderPending(); });
+  });
+}
+
+// Validate + stage a createVlan edit into the shared pipeline. Inline errors for out-of-range /
+// duplicate VID; the edit rides the same Review -> plan -> apply path as everything else.
+function stageCreateVlan() {
+  const err = $("addVlanErr");
+  const vidRaw = ($("newVlanVid").value || "").trim();
+  const name = ($("newVlanName").value || "").trim();
+  const setErr = (m) => { if (err) err.textContent = m; };
+  setErr("");
+  if (vidRaw === "") { setErr("Enter a VID"); return; }
+  const vid = Number(vidRaw);
+  if (!Number.isInteger(vid) || vid < 1 || vid > 4094) { setErr("VID must be an integer 1-4094"); return; }
+  // Duplicate check: reject VIDs already on the device, or already staged for create.
+  const existing = new Set((lastState?.vlans || []).map((v) => v.vid));
+  if (existing.has(vid)) { setErr(`VLAN ${vid} already exists`); return; }
+  const stagedCreate = vlanStructEdits.get(vid);
+  if (stagedCreate && stagedCreate.kind === "createVlan") { setErr(`VLAN ${vid} is already staged`); return; }
+  // Stage the engine Edit verbatim; name omitted (not empty string) when blank keeps the edit minimal.
+  vlanStructEdits.set(vid, name ? { kind: "createVlan", vid, name } : { kind: "createVlan", vid });
+  renderAll();       // re-render so the new pending row shows (and clears the inputs)
+  renderPending();   // reflect it in the pending bar for Review/apply
+}
+
+// Stage a deleteVlan edit for an existing VLAN. Replaces any other structural edit staged on that vid.
+function stageDeleteVlan(vid) {
+  if (!Number.isInteger(vid)) return;
+  vlanStructEdits.set(vid, { kind: "deleteVlan", vid });
+  renderAll();
+  renderPending();
+}
+
+// Inline rename: replace the row's action cell content with a small text input prefilled with the
+// current (or already-staged) name; commit stages a renameVlan edit, cancel restores the row.
+function openVlanRename(vid, btn) {
+  const cell = btn.closest("td.vlact");
+  if (!cell) return;
+  const staged = vlanStructEdits.get(vid);
+  const current = staged && staged.kind === "renameVlan"
+    ? staged.name
+    : ((lastState?.vlans || []).find((v) => v.vid === vid)?.name || "");
+  cell.innerHTML =
+    `<input type="text" class="vlanname vlrenin" maxlength="32" value="${esc(current)}" placeholder="new name">
+     <button class="vlrenok" title="Stage the rename">OK</button>
+     <button class="editbtn vlrencancel">Cancel</button>`;
+  const input = cell.querySelector(".vlrenin");
+  if (input) { input.focus(); input.select(); }
+  const commit = () => {
+    const name = (input.value || "").trim();
+    // Empty rename is a no-op; drop any staged rename rather than send an empty name.
+    if (name === "") { vlanStructEdits.delete(vid); }
+    else { vlanStructEdits.set(vid, { kind: "renameVlan", vid, name }); }
+    renderAll();
+    renderPending();
+  };
+  cell.querySelector(".vlrenok").addEventListener("click", commit);
+  cell.querySelector(".vlrencancel").addEventListener("click", () => { renderAll(); });
+  if (input) input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") commit();
+    else if (e.key === "Escape") renderAll();
+  });
 }
 
 // Collect the working edits into the engine Edit[] shape.
@@ -317,6 +483,9 @@ function collectEdits() {
     ...[...pending.values()].map((p) => ({ kind: "setPvid", bridgePort: p.bridge, vid: p.vid })),
     ...[...memEdits.entries()].map(([vid, e]) => ({ kind: "setVlanMembership", vid, tagged: [...e.tagged], untagged: [...e.untagged] })),
     ...[...pendingLag.entries()].map(([bridge, lagId]) => ({ kind: "setLag", bridgePort: bridge, lagId })),
+    // VLAN structural edits (create/delete/rename) are already stored in engine-Edit shape, so emit
+    // them verbatim onto the same plan/apply path (the SafetyEngine classifies them; gating unchanged).
+    ...[...vlanStructEdits.values()],
     // Phase 3: a staged generic-object write rides the same path. Drop undefined snmpType/name so the
     // engine infers the SNMP type from the MIB SYNTAX when the meta didn't carry one.
     ...(pendingSetObject ? [pruneEdit({
@@ -335,11 +504,11 @@ function pruneEdit(e) {
 
 // Total count of staged edits across all editors (grid + generic object).
 function pendingTotal() {
-  return pending.size + memEdits.size + pendingLag.size + (pendingSetObject ? 1 : 0);
+  return pending.size + memEdits.size + pendingLag.size + vlanStructEdits.size + (pendingSetObject ? 1 : 0);
 }
 
 function clearPendingState() {
-  pending.clear(); memEdits.clear(); pendingLag.clear();
+  pending.clear(); memEdits.clear(); pendingLag.clear(); vlanStructEdits.clear();
   pendingSetObject = null;
   lastPlanSafety = null; blockedConfirmText = "";
 }
@@ -356,6 +525,7 @@ function renderPending(msg, cls) {
     ...[...pending.values()].map((p) => `g${p.bridge}->VLAN ${p.vid}`),
     ...[...memEdits.keys()].map((vid) => `VLAN ${vid} members`),
     ...[...pendingLag.entries()].map(([b, lag]) => `g${b}->${lag == null ? "no LAG" : "LAG " + lag}`),
+    ...[...vlanStructEdits.values()].map((e) => editLabel(e)),
     ...(pendingSetObject ? [`${pendingSetObject.name || pendingSetObject.oid}=${pendingSetObject.value}`] : []),
   ];
   bar.style.display = "flex";
@@ -870,6 +1040,7 @@ async function connect() {
     pending.clear();
     memEdits.clear();
     pendingLag.clear();
+    vlanStructEdits.clear();
     renderAll();
     renderPending();
     const t = new Date(lastState.readAt).toLocaleTimeString();

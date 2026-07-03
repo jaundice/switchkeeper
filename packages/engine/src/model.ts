@@ -130,6 +130,7 @@ export type Edit =
   | { kind: "setLag"; bridgePort: number; lagId: number | null }
   | { kind: "createVlan"; vid: number; name?: string }
   | { kind: "deleteVlan"; vid: number }
+  | { kind: "renameVlan"; vid: number; name: string }
   // Phase 3 generic write: SET an arbitrary writable vendor object. `oid` is the
   // FULLY-QUALIFIED instance OID (e.g. a scalar's ".0"); `name` is optional (the symbol,
   // for display/audit); `snmpType` is the net-snmp ObjectType code — if omitted, the apply

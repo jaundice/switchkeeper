@@ -91,10 +91,6 @@ export function editToVarbinds(edit: Edit, state: DeviceState, mib?: MibStore): 
     case "deleteVlan":
       return [{ oid: `${OID.dot1qVlanStaticRowStatus}.${edit.vid}`, type: T.Integer, value: 6 /* destroy */ }];
 
-    case "renameVlan":
-      // Rename-in-place: a plain SET of the VLAN name OCTET STRING on an existing row.
-      return [{ oid: `${OID.dot1qVlanStaticName}.${edit.vid}`, type: T.OctetString, value: Buffer.from(edit.name, "utf8") }];
-
     case "setObject":
       // Generic write: type comes from the edit, or is inferred from the resolved MIB SYNTAX.
       return [setObjectVarbind(edit, mib)];
@@ -232,8 +228,6 @@ function describe(edit: Edit, state: DeviceState): { before: unknown; after: unk
       return { before: null, after: { vid: edit.vid, name: edit.name } };
     case "deleteVlan":
       return { before: { vid: edit.vid }, after: null };
-    case "renameVlan":
-      return { before: { name: state.vlans.find((x) => x.vid === edit.vid)?.name }, after: { name: edit.name } };
     case "setObject":
       // The current (before) value needs a read-only GET against the device, which `describe` (pure)
       // can't do. planChanges fills it via readSetObjectBefore when a client is supplied; here we
@@ -394,11 +388,6 @@ async function verifyEdit(client: SnmpClient, edit: Edit, target: VarbindSet[]):
   if (edit.kind === "deleteVlan") {
     const rs = await vlanStaticRowStatus(client, edit.vid);
     return rs === undefined || rs === 6; // row gone
-  }
-  if (edit.kind === "renameVlan") {
-    // Read the VLAN name back and compare to what we set.
-    const got = await client.get([`${OID.dot1qVlanStaticName}.${edit.vid}`]);
-    return asString(got[0]?.value) === edit.name;
   }
   if (edit.kind === "setVlanMembership") {
     const wantEgress = new Set(uniq([...edit.tagged, ...edit.untagged]));

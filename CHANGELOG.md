@@ -6,6 +6,26 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-03
+
+### Added
+
+- **VLAN structural editing (add / delete / rename).** The desktop VLANs section now has, behind
+  Advanced mode, a **New VLAN** control (VID + optional name), and per-row **Delete** and **Rename**
+  affordances. Staged changes flow through the existing plan → SafetyEngine → apply path, so creating
+  a VLAN is `safe`, deleting a normal VLAN is `risky` (deleting the management VLAN is `blocked`), and
+  renaming is `safe` (`risky` for the management VLAN).
+- **`renameVlan` engine edit** — rename a VLAN in place via `dot1qVlanStaticName` (no recreate), with
+  read-back verify and automatic rollback. Complements the existing `createVlan` / `deleteVlan` /
+  `setVlanMembership` edits.
+- **VLAN MCP convenience tools** — `switch_create_vlan`, `switch_delete_vlan`, `switch_rename_vlan`
+  wrap the create/delete/rename edits through the same safety-gated apply path (with
+  `acknowledge` / `save`), instead of only the generic `switch_plan` / `switch_apply` edits array.
+
+Changing a VLAN's VID (renumbering) is intentionally not yet supported — it is a compound migration
+(recreate under the new VID, move all membership + PVIDs, delete the old) and is planned as a
+follow-up with its own hard safety gating.
+
 ## [0.4.5] - 2026-07-03
 
 ### Fixed

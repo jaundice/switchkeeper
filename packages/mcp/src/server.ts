@@ -157,6 +157,54 @@ function buildServer(): McpServer {
     const edit: Edit = { kind: "setObject", oid, value, snmpType, name };
     return ok(await applyDevice(host, v2c(community, writeCommunity), [edit], { save: false, acknowledge }));
   });
+  server.registerTool("switch_create_vlan", {
+    description: "Create an 802.1Q VLAN (Q-BRIDGE RowStatus createAndGo). Safety-gated; creating a VLAN is " +
+      "classified `safe`. Requires a write community. `save=true` persists after a reachable apply.",
+    inputSchema: {
+      host: z.string(),
+      vid: z.number(),
+      name: z.string().optional(),
+      community: z.string().optional(),
+      writeCommunity: z.string().optional(),
+      acknowledge: z.object({ allowRisky: z.boolean().optional(), allowBlocked: z.boolean().optional() }).optional(),
+      save: z.boolean().optional(),
+    },
+  }, async ({ host, vid, name, community, writeCommunity, acknowledge, save }) => {
+    const edit: Edit = { kind: "createVlan", vid, name };
+    return ok(await applyDevice(host, v2c(community, writeCommunity), [edit], { save: !!save, acknowledge }));
+  });
+  server.registerTool("switch_delete_vlan", {
+    description: "Delete a VLAN. Classified `risky` for a normal VLAN (member ports lose it) so requires " +
+      "`acknowledge:{allowRisky:true}`; deleting the management VLAN is `blocked` (needs `allowBlocked`). " +
+      "Requires a write community.",
+    inputSchema: {
+      host: z.string(),
+      vid: z.number(),
+      community: z.string().optional(),
+      writeCommunity: z.string().optional(),
+      acknowledge: z.object({ allowRisky: z.boolean().optional(), allowBlocked: z.boolean().optional() }).optional(),
+      save: z.boolean().optional(),
+    },
+  }, async ({ host, vid, community, writeCommunity, acknowledge, save }) => {
+    const edit: Edit = { kind: "deleteVlan", vid };
+    return ok(await applyDevice(host, v2c(community, writeCommunity), [edit], { save: !!save, acknowledge }));
+  });
+  server.registerTool("switch_rename_vlan", {
+    description: "Rename a VLAN in place (dot1qVlanStaticName). Classified `safe` for a normal VLAN, `risky` " +
+      "for the management VLAN. Requires a write community.",
+    inputSchema: {
+      host: z.string(),
+      vid: z.number(),
+      name: z.string(),
+      community: z.string().optional(),
+      writeCommunity: z.string().optional(),
+      acknowledge: z.object({ allowRisky: z.boolean().optional(), allowBlocked: z.boolean().optional() }).optional(),
+      save: z.boolean().optional(),
+    },
+  }, async ({ host, vid, name, community, writeCommunity, acknowledge, save }) => {
+    const edit: Edit = { kind: "renameVlan", vid, name };
+    return ok(await applyDevice(host, v2c(community, writeCommunity), [edit], { save: !!save, acknowledge }));
+  });
   server.registerTool("switch_save", {
     description: "Persist running config to startup (vendor-specific; may be unsupported on some models).",
     inputSchema: { host: z.string(), writeCommunity: z.string(), community: z.string().optional() },
