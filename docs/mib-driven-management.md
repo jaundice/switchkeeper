@@ -250,6 +250,26 @@ The usual agent flow is: `switch_capabilities` to see what the device exposes,
 `switch_table` to load a table's rows, `switch_plan` to see each edit's safety class,
 then `switch_apply` / `switch_set_object` with the appropriate `acknowledge`.
 
+## SNMP compatibility notes
+
+Agents implement the standard MIBs unevenly. Switchkeeper detects and works around two common
+quirks automatically — no configuration needed:
+
+- **GETBULK that returns nothing.** Table reads use GETBULK for speed (far fewer round-trips than
+  GETNEXT). Some agents (observed on Extreme EXOS / Switch Engine) answer a GETBULK with *no
+  varbinds* instead of an error, which would make every table look empty (0 ports, 0 VLANs). When a
+  bulk walk comes back empty, Switchkeeper re-checks with a GETNEXT walk; if that finds rows it uses
+  them and disables GETBULK for the rest of that session, so later columns skip straight to the
+  working path. Agents that handle GETBULK correctly are unaffected, and a genuinely empty column
+  costs only one extra cheap GETNEXT.
+- **Empty "current" VLAN tables.** 802.1Q port membership can be read from the live
+  `dot1qVlanCurrentEgressPorts` / `dot1qVlanCurrentUntaggedPorts` tables or from the
+  `dot1qVlanStaticEgressPorts` / `dot1qVlanStaticUntaggedPorts` config tables. Some agents (again,
+  Extreme EXOS) never populate the volatile "current" tables and only expose the static ones —
+  which would show VLANs with no tagged/untagged members. Switchkeeper prefers "current" (it
+  reflects the running state) and falls back to the static tables when "current" is empty. The
+  device's `membershipSource` (`current` or `static`) reports which was used.
+
 ## Operational notes
 
 - **Writes need two things.** A **write community** (v2c) or a v3 user with write access,

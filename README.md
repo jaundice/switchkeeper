@@ -123,6 +123,23 @@ The server exposes the engine as MCP tools (read, plan, apply, save, scan, inter
 `http://<host>:7341/mcp` to let an agent inspect and manage switches. Apply operations go
 through the same plan→verify path as the UI.
 
+If you front the server with a reverse proxy and a TLS certificate from an internal or
+self-signed CA, bridge the client with [`mcp-remote`](https://www.npmjs.com/package/mcp-remote)
+so it speaks a proper long-lived transport — a bare `curl <url>` is a single request, not an MCP
+transport. Give Node the trust anchor via `NODE_EXTRA_CA_CERTS`:
+
+```json
+"switchkeeper": {
+  "command": "npx",
+  "args": ["-y", "mcp-remote", "https://switches.example.internal/mcp"],
+  "env": { "NODE_EXTRA_CA_CERTS": "/path/to/internal-ca-root.crt" }
+}
+```
+
+Use the certificate of the CA that actually signed the endpoint's cert. With a private CA the
+same CN can exist with different keys (e.g. two Caddy instances) — anchor on the root from the
+served chain, not just any same-named root, or Node reports `UNABLE_TO_GET_ISSUER_CERT_LOCALLY`.
+
 ## Supported hardware
 
 Switchkeeper speaks **standard MIBs** (RFC 2674/4363 Q-BRIDGE, IF-MIB, BRIDGE-MIB,
@@ -133,6 +150,12 @@ work on many SNMP-managed switches. Device-specific behaviour lives in
 | Device | Read | VLAN/PVID write | PoE | LAG read | Save config |
 |---|---|---|---|---|---|
 | Netgear GS748TP (reference) | ✅ | ✅ | ✅ | ✅ | ⚠️ vendor OID unconfirmed |
+| Extreme EXOS (e.g. X440) | ✅ | ◻️ untested | n/a | ✅ | ◻️ untested |
+| Extreme Switch Engine (e.g. 5520) | ✅ | ◻️ untested | n/a | ✅ | ◻️ untested |
+
+Extreme EXOS / Switch Engine agents leave the Q-BRIDGE *current* tables empty and (Switch Engine)
+mishandle GETBULK; both are handled automatically — see
+[SNMP compatibility notes](./docs/mib-driven-management.md#snmp-compatibility-notes).
 
 Adding a profile for your switch is the main way to contribute — see
 [CONTRIBUTING.md](./CONTRIBUTING.md).
