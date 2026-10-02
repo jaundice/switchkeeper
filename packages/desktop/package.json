@@ -19,7 +19,7 @@
     "dist": "npm run build:engine && electron-builder --publish never"
   },
   "devDependencies": {
-    "electron": "^39.8.10",
+    "electron": "^41.10.6",
     "electron-builder": "^26.15.3",
     "esbuild": "^0.28.1"
   },
