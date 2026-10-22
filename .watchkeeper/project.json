@@ -1,0 +1,38 @@
+{
+  "projectId": "switchkeeper",
+  "bootstrap": [
+    "if [ -L node_modules ]; then echo 'bootstrap: node_modules was a link; removing the link, not its target, before installing' >&2; rm node_modules; fi",
+    "npm ci --ignore-scripts --no-audit --no-fund"
+  ],
+  "gates": {
+    "test": {
+      "run": "npm test",
+      "timeoutMs": 600000
+    }
+  },
+  "budgetDefaults": {
+    "maxSteps": 120
+  },
+  "capabilities": {
+    "agentSide": [
+      "run the engine unit tests (packages/engine, node --test over test/**/*.test.ts, run directly via Node type stripping, no build step; needs Node >= 22.18 built with TypeScript support)",
+      "typecheck the engine with tsc -p packages/engine/tsconfig.json --noEmit",
+      "bundle the engine for the desktop host with esbuild (npm run build:engine --workspace @switchkeeper/desktop)"
+    ],
+    "postMerge": [
+      "anything that talks to a real switch over SNMP (UDP/161) or NSDP: reads, applies, save-config, discovery sweeps; no switch is reachable from the worktree host",
+      "launching or packaging the Electron desktop app (electron-builder installers for Windows, macOS, Linux)",
+      "building or running the Docker image, or observing GitHub Actions runs"
+    ]
+  },
+  "sharedFileScope": [
+    "package-lock.json",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "buildOutput": [
+    "dist",
+    "build",
+    "coverage"
+  ]
+}
