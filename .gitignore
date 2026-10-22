@@ -31,3 +31,6 @@ release/
 
 usermibs.tgz
 
+
+# local MIB store and cache created by the server at runtime
+/mibs/

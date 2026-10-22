@@ -272,8 +272,11 @@ if (httpIdx >= 0) {
     }
     return webHtml;
   };
+  // Read once and cache, like index.html, so requests never touch the file system.
+  let appJs: string | null = null;
+  const getAppJs = () => (appJs ??= fs.readFileSync(path.join(rendererDir, "app.js"), "utf8"));
   app.get("/", (_req, res) => res.type("html").send(getWebHtml()));
-  app.get("/app.js", (_req, res) => res.type("application/javascript").send(fs.readFileSync(path.join(rendererDir, "app.js"), "utf8")));
+  app.get("/app.js", (_req, res) => res.type("application/javascript").send(getAppJs()));
   app.use(express.static(webDir)); // web-bridge.js, manifest.webmanifest, sw.js, icon.svg
 
   app.get("/health", (_req, res) => res.json({ ok: true, service: "switchkeeper" }));
