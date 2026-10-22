@@ -6,6 +6,28 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-23
+
+### Security
+
+- **Server: no file-system read per request for `/app.js`.** The web UI's `app.js` is now read
+  once and cached, as `index.html` already was, instead of on every `GET /app.js` (CodeQL
+  `js/missing-rate-limiting`). Edits to the renderer now need a server restart to show up.
+- **CI: least-privilege token.** The `tests` workflow limits `GITHUB_TOKEN` to `contents: read`
+  (CodeQL `actions/missing-workflow-permissions`).
+
+### Changed
+
+- **Dependency updates** since 0.5.0, including Electron 33 → 45 and electron-builder 25 → 26 for
+  the desktop app, express 4 → 5 and `@modelcontextprotocol/sdk` 1.12 → 1.32 for the server, and
+  esbuild 0.24 → 0.28.
+  `package-lock.json` is back in sync with `packages/desktop`, so `npm ci` installs again.
+
+### Added
+
+- `.watchkeeper/project.json`, declaring the repository to the Watchkeeper (wk) agent factory.
+  `/mibs/` (the server's runtime MIB store and cache) is now git-ignored.
+
 ## [0.5.0] - 2026-07-03
 
 ### Added
