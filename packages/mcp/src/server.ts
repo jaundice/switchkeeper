@@ -108,7 +108,7 @@ function buildServer(): McpServer {
   }, async ({ host, community }) => ok(await readDevice(host, v2c(community))));
   server.registerTool("switch_plan", {
     description: "Dry-run: diff edits against the live switch (no writes). edits e.g. [{\"kind\":\"setPvid\",\"bridgePort\":1,\"vid\":10}].",
-    inputSchema: { host: z.string(), edits: z.array(z.record(z.any())), community: z.string().optional() },
+    inputSchema: { host: z.string(), edits: z.array(z.record(z.string(), z.any())), community: z.string().optional() },
   }, async ({ host, edits, community }) => ok(await planDevice(host, v2c(community), edits as Edit[])));
   server.registerTool("switch_apply", {
     // Phase 2: risky/blocked edits are refused by the engine's safety gate unless explicitly
@@ -121,7 +121,7 @@ function buildServer(): McpServer {
       "(connectivity-severing) edits; without these the engine refuses them and sends no SETs.",
     inputSchema: {
       host: z.string(),
-      edits: z.array(z.record(z.any())),
+      edits: z.array(z.record(z.string(), z.any())),
       writeCommunity: z.string(),
       community: z.string().optional(),
       save: z.boolean().optional(),
