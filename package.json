@@ -32,5 +32,8 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present"
+  },
+  "overrides": {
+    "minimatch@>=7.0.0 <11.0.1": "11.0.4"
   }
 }
